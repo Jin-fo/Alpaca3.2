@@ -1,0 +1,231 @@
+from head import *
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+from keras._tf_keras.keras.models import Sequential
+from keras._tf_keras.keras.layers import Dense, LSTM as KerasLSTM, InputLayer, GRU, Conv1D, MaxPooling1D, Flatten, Dropout
+from keras._tf_keras.keras.optimizers import Adam
+from typing import Dict, Any, List
+from sklearn.preprocessing import MinMaxScaler
+
+
+class Model: 
+    """A class for building, training and operating a deep learning model for market prediction."""
+    
+    # Class attributes
+    model: Sequential
+    scaler: MinMaxScaler
+    config: Dict
+    dataset: pd.DataFrame
+    scaled_data: pd.DataFrame
+    x_train: np.ndarray
+    y_train: np.ndarray
+    train_length: int
+
+    def __init__(self, config: Dict = None):
+        """Initialize model with name and configuration."""
+        self.config = config or {
+            'sequence_length': 60,
+            'train_split': 0.8,
+            'batch_size': 16,
+            'epochs': 1,
+            'learning_rate': 0.001
+        }
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
+        self.model = None
+        self.x_train = None
+        self.y_train = None
+        self.train_length = 0
+        self.dataset = None
+        self.scaled_data = None
+
+    def preprocess(self, data: pd.DataFrame, columns: List[str]) -> Dict[str, np.ndarray]:
+        """Process raw data into training format for AI model."""
+        # Validate inputs
+        if data is None or data.empty:
+            raise ValueError("Input data cannot be None or empty")
+        
+        if not columns or not all(col in data.columns for col in columns):
+            raise ValueError(f"Invalid columns: {columns}. Must be present in data.")
+        
+        # Extract and reshape data    
+        self.dataset = data[columns].values
+        if len(columns) == 1:
+            self.dataset = self.dataset.reshape(-1, 1)
+            
+        # Scale data and prepare sequences
+        self.scaled_data = self.scaler.fit_transform(self.dataset)
+        self.train_length = int(len(self.dataset) * self.config['train_split'])
+        seq_length = self.config['sequence_length']
+        
+        # Build training sequences
+        x_sequences, y_values = [], []
+        for i in range(seq_length, len(self.scaled_data)):
+            # Input sequence - all features
+            if self.scaled_data.shape[1] == 1:
+                x_sequences.append(self.scaled_data[i-seq_length:i, 0])
+            else:
+                x_sequences.append(self.scaled_data[i-seq_length:i, :])
+            # Target - first feature
+            y_values.append(self.scaled_data[i, 0])
+        
+        # Convert to arrays and reshape if needed
+        self.x_train = np.array(x_sequences)
+        self.y_train = np.array(y_values)
+        if len(self.x_train.shape) == 2:
+            self.x_train = np.reshape(self.x_train, (self.x_train.shape[0], self.x_train.shape[1], 1))
+            
+        return {"x_train": self.x_train, "y_train": self.y_train}
+    
+    def train(self) -> Dict:
+        """Train the model on prepared data."""
+        if self.model is None:
+            self.build()
+            
+        if self.x_train is None or self.y_train is None:
+            raise ValueError("Training data not prepared. Run preprocess() first.")
+            
+        history = self.model.fit(
+            self.x_train, self.y_train, 
+            batch_size=self.config['batch_size'],
+            epochs=self.config['epochs'],
+            validation_split=0.1,
+            verbose=1
+        )
+        
+        return history.history
+
+    def test(self, scaled_data=None) -> np.ndarray:
+        """Prepare data for testing/prediction."""
+        if scaled_data is None:
+            scaled_data = self.scaled_data
+            
+        if scaled_data is None:
+            raise ValueError("No data available for testing")
+            
+        seq_length = self.config['sequence_length']
+        test_data = scaled_data[self.train_length - seq_length:]
+        
+        x_test = []
+        for i in range(seq_length, len(test_data)):
+            if test_data.shape[1] == 1:
+                x_test.append(test_data[i-seq_length:i, 0])
+            else:
+                x_test.append(test_data[i-seq_length:i, :])
+        
+        x_test = np.array(x_test)
+        if len(x_test.shape) == 2:
+            x_test = np.reshape(x_test, (x_test.shape[0], x_test.shape[1], 1))
+        
+        return x_test
+
+    def evaluate(self, x_test, y_test) -> Dict:
+        """Evaluate model performance."""
+        if self.model is None:
+            raise ValueError("Model not built. Call build() first.")
+        results = self.model.evaluate(x_test, y_test, verbose=0)
+        return {"loss": results}
+
+    def operate(self, input_data=None, future_steps=6) -> pd.DataFrame:
+        """Generate future predictions."""
+        if self.model is None:
+            raise ValueError("Model not built. Call build() first.")
+            
+        # Get/validate input data
+        if input_data is None:
+            input_data = self.scaled_data
+        elif isinstance(input_data, pd.DataFrame):
+            input_data = input_data.values
+        
+        # Check compatibility
+        n_features = self.scaler.n_features_in_
+        if len(input_data.shape) > 1 and input_data.shape[1] != n_features:
+            input_data = input_data[:, :n_features]
+        
+        seq_length = self.config['sequence_length']
+        if len(input_data) < seq_length:
+            raise ValueError(f"Input data needs at least {seq_length} points")
+        
+        # Prepare for prediction
+        input_scaled = self.scaler.transform(input_data)
+        last_sequence = input_scaled[-seq_length:]
+        
+        if len(last_sequence.shape) == 1:
+            x_predict = last_sequence.reshape(1, seq_length, 1)
+        else:
+            x_predict = last_sequence.reshape(1, seq_length, last_sequence.shape[1])
+        
+        # Make predictions
+        predictions = [self.model.predict(x_predict, verbose=0)[0]]
+        
+        for _ in range(1, future_steps):
+            if x_predict.shape[2] == 1:
+                x_predict = np.append(x_predict[:, 1:, :], 
+                                    predictions[-1].reshape(1, 1, 1), 
+                                    axis=1)
+            else:
+                next_point = np.zeros((1, 1, x_predict.shape[2]))
+                next_point[0, 0, 0] = predictions[-1]
+                next_point[0, 0, 1:] = x_predict[0, -1, 1:]
+                x_predict = np.append(x_predict[:, 1:, :], next_point, axis=1)
+            
+            predictions.append(self.model.predict(x_predict, verbose=0)[0])
+        
+        # Convert to original scale
+        predictions_array = np.array(predictions).reshape(-1, 1)
+        
+        if n_features == 1:
+            predictions_np = self.scaler.inverse_transform(predictions_array)
+        else:
+            dummy_array = np.zeros((len(predictions_array), n_features))
+            dummy_array[:, 0] = predictions_array.flatten()
+            predictions_np = self.scaler.inverse_transform(dummy_array)[:, 0].reshape(-1, 1)
+        
+        return pd.DataFrame(predictions_np, columns=['Predicted'])
+
+    
+class LSTM(Model):
+    """LSTM model implementation for time series prediction."""
+    name: str
+    def __init__(self, name="lstm_model", config=None):
+        self.name = name
+        lstm_config = {
+            'sequence_length': 60,
+            'train_split': 0.8,
+            'lstm_units': [50, 50],
+            'dense_units': [25, 1],
+            'batch_size': 16,
+            'epochs': 1,
+            'learning_rate': 0.001
+        }
+        if config:
+            lstm_config.update(config)
+        super().__init__(lstm_config)
+    
+    def build(self) -> Sequential:
+        """Build LSTM model architecture."""
+        if self.x_train is None:
+            raise ValueError("Must run preprocess() before building the model")
+        
+        self.model = Sequential(name=self.name)
+        input_shape = (self.x_train.shape[1], self.x_train.shape[2])
+        
+        # Build network
+        self.model.add(InputLayer(shape=input_shape))
+        
+        for i, units in enumerate(self.config['lstm_units']):
+            return_sequences = i < len(self.config['lstm_units']) - 1
+            self.model.add(KerasLSTM(units, return_sequences=return_sequences))
+        
+        for units in self.config['dense_units'][:-1]:
+            self.model.add(Dense(units, activation='relu'))
+        
+        self.model.add(Dense(self.config['dense_units'][-1]))
+        
+        # Compile model
+        optimizer = Adam(learning_rate=self.config['learning_rate'])
+        self.model.compile(optimizer=optimizer, loss='mean_squared_error')
+        self.model.summary()
+        
+        return self.model
+    
