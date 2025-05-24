@@ -112,7 +112,8 @@ class Client:
     
     async def on_update(self, data) -> None:
         self.new_data = data
-        print(f"[o] {data.symbol}: ${data.close}")
+        print(f"[o] {data.symbol}")
+        print(f"    ├── {data.timestamp}: ${data.close}")
 
     def get_stream_status(self):
         """Get current stream status and clean up finished tasks"""
@@ -134,7 +135,14 @@ class Client:
             print("[!] No active streams to stop")
             return
         
-        print(f"[+] Stopping {len(self.active_stream)} active streams...")
+        # Show which symbols are being stopped
+        symbols_to_stop = []
+        if self.focused["crypto"]:
+            symbols_to_stop.extend(self.focused["crypto"])
+        if self.focused["stock"]:
+            symbols_to_stop.extend(self.focused["stock"])
+        
+        print(f"[+] Stopping all streams: {', '.join(symbols_to_stop)}")
         
         # Cancel all active stream tasks
         cancelled_tasks = []
@@ -153,13 +161,19 @@ class Client:
         # Clear the list
         self.active_stream.clear()
         
-        print("[o] All streams stopped and objects cleaned up")
-
-    def stream_cleanup(self):
-        for stream in self.active_stream:
-            stream.close()
+        print("[o] Streams stopped")
+    async def stream_cleanup(self, stream):
+        """Completely cleanup and delete stream object"""
+        try:
+            if hasattr(stream, '_ws') and stream._ws:
+                await stream._ws.close()
+            if hasattr(stream, 'close'):
+                await stream.close()
+            # Force garbage collection
             del stream
-
+        except Exception as e:
+            print(f"[!] Cleanup warning: {e}")
+            
     def position_info(self):
         print(f"\n[+] Positions")
         try:
@@ -329,40 +343,34 @@ class Account(Client):
         # Store the stream object for complete deletion later
         stream._client_ref = self  # Add reference for cleanup
         
-        try:
-            print(f"[+] Subscribing to crypto {type}: {crypto_symbols}")
-            stream._subscribe(
-                handler=self.on_update,
-                symbols=crypto_symbols,
-                handlers=stream._handlers[type],
-            )
-            await stream._run_forever()
-            return True
-        except ValueError as e:
-            if "connection limit exceeded" in str(e):
-                print("[!] API connection limit reached. Wait 30+ seconds before trying again.")
-                return False
-            else:
+        async def _stream_task():
+            try:
+                stream._subscribe(
+                    handler=self.on_update,
+                    symbols=crypto_symbols,
+                    handlers=stream._handlers[type],
+                )
+                await stream._run_forever()
+                return True
+            except ValueError as e:
+                if "connection limit exceeded" in str(e):
+                    print("[!] API connection limit reached. Wait 30+ seconds before trying again.")
+                    return False
+                else:
+                    print(f"[!] Stream error: {e}")
+                    return False
+            except Exception as e:
                 print(f"[!] Stream error: {e}")
                 return False
-        except Exception as e:
-            print(f"[!] Stream error: {e}")
-            return False
-        finally:
-            # Always cleanup the stream object
-            await self.stream_cleanup(stream)
-
-    async def stream_cleanup(self, stream):
-        """Completely cleanup and delete stream object"""
-        try:
-            if hasattr(stream, '_ws') and stream._ws:
-                await stream._ws.close()
-            if hasattr(stream, 'close'):
-                await stream.close()
-            # Force garbage collection
-            del stream
-        except Exception as e:
-            print(f"[!] Cleanup warning: {e}")
+            finally:
+                # Always cleanup the stream object
+                await self.stream_cleanup(stream)
+        
+        # Create and append task to active_stream list
+        task = asyncio.create_task(_stream_task())
+        self.active_stream.append(task)
+        
+        return True
 
     async def stock_stream(self, type: str, stock_symbols: list) -> bool:
         """Simple stock streaming with complete object cleanup"""
@@ -377,28 +385,34 @@ class Account(Client):
         # Store the stream object for complete deletion later
         stream._client_ref = self  # Add reference for cleanup
         
-        try:
-            print(f"[+] Subscribing to stock {type}: {stock_symbols}")
-            stream._subscribe(
-                handler=self.on_update,
-                symbols=stock_symbols,
-                handlers=stream._handlers[type],
-            )
-            await stream._run_forever()
-            return True
-        except ValueError as e:
-            if "connection limit exceeded" in str(e):
-                print("[!] Stock API connection limit reached. Wait 30+ seconds before trying again.")
-                return False
-            else:
+        async def _stream_task():
+            try:
+                stream._subscribe(
+                    handler=self.on_update,
+                    symbols=stock_symbols,
+                    handlers=stream._handlers[type],
+                )
+                await stream._run_forever()
+                return True
+            except ValueError as e:
+                if "connection limit exceeded" in str(e):
+                    print("[!] Stock API connection limit reached. Wait 30+ seconds before trying again.")
+                    return False
+                else:
+                    print(f"[!] Stock stream error: {e}")
+                    return False
+            except Exception as e:
                 print(f"[!] Stock stream error: {e}")
                 return False
-        except Exception as e:
-            print(f"[!] Stock stream error: {e}")
-            return False
-        finally:
-            # Always cleanup the stream object
-            await self.stream_cleanup(stream)
+            finally:
+                # Always cleanup the stream object
+                await self.stream_cleanup(stream)
+        
+        # Create and append task to active_stream list
+        task = asyncio.create_task(_stream_task())
+        self.active_stream.append(task)
+        
+        return True
 
     def account_info(self):
         print (f"\n[+] Profile")

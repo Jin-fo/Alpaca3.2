@@ -274,7 +274,7 @@ class Application:
         "step" : {
             "day" : 0,
             "hour" : 0,
-            "minute" : 1,
+            "minute" : 5,
         },
     }
     
@@ -379,29 +379,20 @@ class Application:
             return
             
         try:
-            print("[+] Starting streams...")
-            
             # Start crypto stream if we have crypto symbols
             crypto_symbols = self.account.focused["crypto"]
             if crypto_symbols:
-                print(f"[+] Starting crypto: {', '.join(crypto_symbols)}")
-                crypto_task = asyncio.create_task(
-                    self.account.crypto_stream(self.data_param["type"], crypto_symbols)
-                )
-                self.account.active_stream.append(crypto_task)
-                await asyncio.sleep(0.5)  # Small delay between connections
+                print(f"[+] Crypto: {', '.join(crypto_symbols)}")
+                await self.account.crypto_stream(self.data_param["type"], crypto_symbols)
             
             # Start stock stream if we have stock symbols
             stock_symbols = self.account.focused["stock"]
             if stock_symbols:
-                print(f"[+] Starting stock: {', '.join(stock_symbols)}")
-                stock_task = asyncio.create_task(
-                    self.account.stock_stream(self.data_param["type"], stock_symbols)
-                )
-                self.account.active_stream.append(stock_task)
+                print(f"[+] Stock: {', '.join(stock_symbols)}")
+                await self.account.stock_stream(self.data_param["type"], stock_symbols)
             
             if self.account.active_stream:
-                print("[o] All streams started! Use option 2 to stop.")
+                print("[o] Streams started")
             else:
                 print("[!] No symbols to stream")
             
@@ -416,10 +407,6 @@ class Application:
             
         print("[-] Stopping streams...")
         await self.account.stream_stop()
-        
-        print("[-] Cleaning up...")
-        await asyncio.sleep(1)  # Reduced from 3 seconds
-        print("[o] Streams stopped")
 
     async def home(self):
         """Simple stream control menu"""
@@ -443,12 +430,20 @@ class Application:
             else:
                 status = "STOPPED"
             
-            print(f"\n[{status}] | 1.Stream 2.Stop 3.Historical 4.Exit")
+            # Display chart-like menu
+            print(f"\n┌─────────────────────────────┐")
+            print(f"     STATUS: {status:<12} ")
+            print(f"├─────────────────────────────┤")
+            print(f"│ 1. Start Stream             │")
+            print(f"│ 2. Stop Stream              │")
+            print(f"│ 3. File Historical          │")
+            print(f"│ 4. Exit                     │")
+            print(f"└─────────────────────────────┘")
             
             try:
                 # Use asyncio to make input non-blocking
                 choice = await asyncio.get_event_loop().run_in_executor(
-                    None, input, "Choice: "
+                    None, input
                 )
                 choice = choice.strip()
                 
