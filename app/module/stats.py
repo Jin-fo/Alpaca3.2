@@ -1,57 +1,67 @@
 from head import *
 
-import matplotlib.pyplot as plt
-import csv
-
 class Stats:
-    data = None
-    symbol = None
-    filename = None
-    column = None
-
-    def __init__(self, symbol: str, column: list[str] = None): 
-        self.symbol = symbol
-        self.filename = f"data/{symbol.replace('/', '_')}_stream.csv"
-        self.column = column
-        
+    def __init__(self):
         os.makedirs('data', exist_ok=True)
-    def write(self, data: pd.DataFrame = None) -> pd.DataFrame:
-        os.makedirs(os.path.dirname(self.filename), exist_ok=True)
-        self.data = data
+        self.filename: str = None
+        self.columns: Optional[List[str]] = None
 
-        # Write data
-        self.data.to_csv(self.filename)
-        print(f" |Filed: {self.filename}")
-        return self.data    
+    async def write(self, data: Dict[str, pd.DataFrame]) -> Dict[str, pd.DataFrame]:
+        try:
+            for symbol, df in data.items():
+                filename = f"data/{symbol.replace('/', '_')}.csv"
+                df.to_csv(filename)
+        except Exception as e:
+            print(f"[!] Error writing data: {e}")
+            return None
+        return data
     
-    def read(self, column: int) -> pd.DataFrame:
+    async def read(self, symbol: str) -> pd.DataFrame:
+        filename = f"data/{symbol.replace('/', '_')}.csv"
+        if not os.path.exists(filename):
+            return None
+
+        return pd.read_csv(filename, parse_dates=[0], index_col=0)
+
+
+
+
+
+
+
+
+
+
+
+    def __init__(self, symbol: str, columns: Optional[List[str]] = None):
+        self.symbol = symbol
+        self.filename = f"data/{symbol.replace('/', '_')}.csv"
+        self.columns = columns
+        os.makedirs('data', exist_ok=True)
+
+    def write(self, data: pd.DataFrame) -> pd.DataFrame:
+        data.to_csv(self.filename)
+        print(f" | File: {self.filename}")
+        return data
+
+    def read(self, columns: Optional[Union[str, List[str]]] = None) -> pd.DataFrame:
         df = pd.read_csv(self.filename, parse_dates=[0], index_col=0)
         
-        if isinstance(column, (str, list)):
-            # Convert single string to list
-            columns_to_get = [column] if isinstance(column, str) else column
+        if columns is None:
+            return df
             
-            # Filter to only include columns that exist in the DataFrame
-            valid_columns = [col for col in columns_to_get if col in df.columns]
-            
-            if valid_columns:
-                return df[valid_columns]
-            else:
-                return df
-        else:
-                return df
+        target_columns = [columns] if isinstance(columns, str) else columns
+        available_columns = [col for col in target_columns if col in df.columns]
         
-    def append(self, data) -> pd.DataFrame:
+        return df[available_columns] if available_columns else df
+
+    def append(self, data: Union[pd.DataFrame, Dict]) -> pd.DataFrame:
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
         
-        # Create file with headers if it doesn't exist
-        if not os.path.exists(self.filename):
-            os.makedirs(os.path.dirname(self.filename), exist_ok=True)
-            df.to_csv(self.filename, index=True)
-        else:
-            # Append without headers to existing file
-            df.to_csv(self.filename, mode='a', header=False, index=True)
-            
+        mode = 'w' if not os.path.exists(self.filename) else 'a'
+        header = mode == 'w'
+        
+        df.to_csv(self.filename, mode=mode, header=header, index=True)
         print(f"Appended {len(df)} records to {self.filename}")
         return df
         
