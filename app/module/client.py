@@ -51,7 +51,12 @@ class Client:
                 CurrencyType.CRYPTO: CryptoHistoricalDataClient,
                 CurrencyType.STOCK: StockHistoricalDataClient
             }
-            return clients[currency](self.config["API_KEY"], self.config["SECRET_KEY"])
+            # Create client with timezone setting
+            client = clients[currency](
+                api_key=self.config["API_KEY"], 
+                secret_key=self.config["SECRET_KEY"]
+            )
+            return client
         except APIError as e:
             print(f"[!] Error creating {currency.value} historical client: {e}")
             return None
@@ -130,21 +135,38 @@ class Account(Client):
             method_name = f"get_{currency.value}_{data_type.value}"
             
             for symbol in self.focused[currency]:
-                request = request_type(
-                    symbol_or_symbols=symbol,
-                    timeframe=self._time_frame(interval), 
-                    start=self._start_time(interval),
-                    asof=None,
-                    feed=None,
-                    asof_timezone=self.info["zone"]
-                )
+                # Create request based on data type
+                if data_type == DataType.BARS:
+                    request = request_type(
+                        symbol_or_symbols=symbol,
+                        timeframe=self._time_frame(interval), 
+                        start=self._start_time(interval),
+                    )
+                else:
+                    request = request_type(
+                        symbol_or_symbols=symbol,
+                        start=self._start_time(interval),
+                    )
                 
-                response = getattr(client_type, method_name)(request)
-                data = response.df
+                # Add timeout to prevent hanging
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.to_thread(getattr(client_type, method_name), request),
+                        timeout=60.0
+                    )
+                except asyncio.TimeoutError:
+                    print(f"[!] API call timed out for {symbol}")
+                    result[symbol] = pd.DataFrame()
+                    continue
+                except Exception as api_error:
+                    print(f"[!] API call failed for {symbol}: {api_error}")
+                    result[symbol] = pd.DataFrame()
+                    continue
                 
-                # Data comes with timezone already handled by Alpaca API
+                # Convert response to DataFrame
+                data = response.df if hasattr(response, 'df') and response.df is not None else pd.DataFrame()
                 result[symbol] = data
-
+            
             return result
             
         except Exception as e:
