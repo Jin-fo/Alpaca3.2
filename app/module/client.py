@@ -43,6 +43,8 @@ class Client:
             paper=config["paper"]
         )
         self.active_stream: Dict[CurrencyType, asyncio.Task] = {}
+        self.stream_clients: Dict[CurrencyType, Union[CryptoDataStream, StockDataStream]] = {}
+        self.hist_data: Dict[CurrencyType, pd.DataFrame] = {}
         self.new_data: Dict[CurrencyType, pd.DataFrame] = {}
     
     def _historical_client(self, currency: CurrencyType) -> Optional[Union[CryptoHistoricalDataClient, StockHistoricalDataClient]]:
@@ -90,14 +92,67 @@ class Client:
         except APIError as e:
             print(f"[!] Error creating {currency.value} stream client: {e}")
             return None
-    
-    def _stream_request(self, currency: CurrencyType, data_type: DataType) -> Optional[type]:
-        pass
-    def _stream_update(self, data) -> None:
-        pass
+        
     def _stream_status(self) -> str:
-        pass
-    
+        """Get current stream status with associated symbols (read-only)"""
+        if not self.active_stream:
+            return "No active streams"
+        
+        status_parts = []
+        active_count = 0
+        
+        for currency, task in self.active_stream.items():
+            if task and not task.done():
+                symbols = self.focused.get(currency, [])
+                symbol_list = ", ".join(symbols) if symbols else "none"
+                status_parts.append(f"{currency.value}: {symbol_list}")
+                active_count += 1
+        
+        if active_count == 0:
+            return "No active streams"
+        
+        status_summary = f"{active_count} active stream(s)"
+        if status_parts:
+            status_detail = " | ".join(status_parts)
+            return f"{status_summary} - {status_detail}"
+        else:
+            return status_summary
+        
+    async def _stream_update(self, data) -> None:
+        try: 
+            # Handle the incoming stream data
+            symbol = getattr(data, 'symbol', 'unknown')
+            timestamp = getattr(data, 'timestamp', datetime.now())
+            
+            # Store the new data
+            self.new_data[symbol] = data
+            print(f"[o] {symbol}: {data}")
+        except Exception as e:
+            print(f"[!] Error updating stream data: {e}")
+
+    async def _stream_cleanup(self, stream) -> None:
+        """Clean up stream resources"""
+        if not stream:
+            return
+            
+        try:
+            # Close WebSocket and session
+            if hasattr(stream, '_ws') and stream._ws and not stream._ws.closed:
+                await stream._ws.close()
+            if hasattr(stream, '_session') and stream._session and not stream._session.closed:
+                await stream._session.close()
+            
+            # Close stream and clear handlers
+            if hasattr(stream, 'close'):
+                await stream.close()
+            if hasattr(stream, '_handlers'):
+                stream._handlers.clear()
+                
+        except Exception as e:
+            print(f"[!] Cleanup warning: {e}")
+        finally:
+            import gc
+            gc.collect()
 
 class Account(Client):
     def __init__(self, config: Dict[str, Union[str, bool]], name: str):
@@ -120,18 +175,22 @@ class Account(Client):
                 else:
                     self.focused[CurrencyType.STOCK].append(asset.symbol)
             except APIError as e:
-                print(f"\n[!] Error focusing on {symbol}: {e}")
+                print(f"[!] Error focusing on {symbol}: {e}")
                 continue
+        
+        print(f"[+] Focused symbols: {self.focused}")
         return self.focused if any(self.focused.values()) else None
     
     async def fetch_historical(self, currency: CurrencyType, data_type: DataType, interval: Dict) -> Optional[Dict[str, pd.DataFrame]]:
+        if not self.focused[currency]:
+            return None
         client_type = self._historical_client(currency)
         request_type = self._historical_request(currency, data_type)
         if not client_type or not request_type:
             return None
         
         try:
-            result = {symbol: None for symbol in self.focused[currency]}
+            self.hist_data = {symbol: None for symbol in self.focused[currency]}
             method_name = f"get_{currency.value}_{data_type.value}"
             
             for symbol in self.focused[currency]:
@@ -147,7 +206,6 @@ class Account(Client):
                         symbol_or_symbols=symbol,
                         start=self._start_time(interval),
                     )
-                
                 # Add timeout to prevent hanging
                 try:
                     response = await asyncio.wait_for(
@@ -156,18 +214,18 @@ class Account(Client):
                     )
                 except asyncio.TimeoutError:
                     print(f"[!] API call timed out for {symbol}")
-                    result[symbol] = pd.DataFrame()
+                    self.hist_data[symbol] = None
                     continue
                 except Exception as api_error:
                     print(f"[!] API call failed for {symbol}: {api_error}")
-                    result[symbol] = pd.DataFrame()
+                    self.hist_data[symbol] = None
                     continue
                 
                 # Convert response to DataFrame
                 data = response.df if hasattr(response, 'df') and response.df is not None else pd.DataFrame()
-                result[symbol] = data
+                self.hist_data[symbol] = data
             
-            return result
+            return self.hist_data
             
         except Exception as e:
             print(f"[!] Error fetching {currency.value} {data_type.value}: {e}")
@@ -198,9 +256,83 @@ class Account(Client):
             print(f"[!] Error creating timeframe: {e}")
             return None
         
-    async def start_stream(self, currency: CurrencyType, data_type: DataType, interval: Dict) -> Optional[Dict[str, pd.DataFrame]]:
-        pass
+    async def start_stream(self, currency: CurrencyType, data_type: DataType) -> str:
+        if not self.focused[currency]:
+            return f"No {currency.value} symbols focused"
         
-    async def stop_stream(self, currency: CurrencyType) -> None:
-        pass
+        # Check if stream is already running for this currency
+        if currency in self.active_stream and not self.active_stream[currency].done():
+            return f"{currency.value.title()} stream already running"
+        
+        # Create stream client using existing method
+        stream_client = self._stream_client(currency)
+        if not stream_client:
+            return f"Failed to create {currency.value} stream client"
+        
+        try:
+            # Subscribe to data using dynamic method lookup
+            method_name = f"subscribe_{data_type.value}"
+            symbols = self.focused[currency]
+            
+            subscribe_method = getattr(stream_client, method_name)
+            subscribe_method(self._stream_update, *symbols)
+            
+            # Store the stream client for cleanup
+            self.stream_clients[currency] = stream_client
+            
+            # Create async task to run the stream
+            async def _run_stream():
+                try:
+                    await stream_client._run_forever()
+                    print(f"[o] {currency.value.title()} stream ended normally")
+                except Exception as e:
+                    print(f"[!] {currency.value.title()} stream error: {e}")
+                finally:
+                    await self._stream_cleanup(stream_client)
+                    # Remove from clients dict when done
+                    if currency in self.stream_clients:
+                        del self.stream_clients[currency]
+            
+            # Start the stream task
+            task = asyncio.create_task(_run_stream())
+            print(f"[o] {currency.value.title()} stream task created")
+            self.active_stream[currency] = task
+            
+            return f"{currency.value.title()} stream started successfully"
+            
+        except Exception as e:
+            return f"Failed to start {currency.value} stream: {str(e)}"
+
+    async def stop_stream(self) -> str:
+        """Stop all active streams with complete cleanup"""
+        if not self.active_stream:
+            return "No active streams to stop"
+
+        stopped_count = 0
+        for currency, task in list(self.active_stream.items()):
+            if task and not task.done():
+                print(f"[o] Stopping {currency.value} stream")
+                
+                # Clean up stream client
+                if currency in self.stream_clients:
+                    await self._stream_cleanup(self.stream_clients[currency])
+                
+                # Cancel and wait for task
+                task.cancel()
+                try:
+                    await asyncio.wait_for(task, timeout=5.0)
+                except (asyncio.CancelledError, asyncio.TimeoutError):
+                    pass
+                
+                stopped_count += 1
+
+        # Clear all and force garbage collection
+        self.active_stream.clear()
+        self.stream_clients.clear()
+        
+        import gc
+        gc.collect()
+        
+        return f"Stopped {stopped_count} stream(s) successfully"
+        
         
