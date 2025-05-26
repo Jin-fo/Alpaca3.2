@@ -215,6 +215,10 @@ class Menu():
     async def select_action(self) -> str:
         return await asyncio.get_event_loop().run_in_executor(None, lambda: input("Enter your choice: ").strip())
     
+    async def wait_for_user(self, message: str = "Press Enter to continue...") -> None:
+        """Non-blocking wait for user input that doesn't interfere with streams"""
+        await asyncio.get_event_loop().run_in_executor(None, lambda: input(message))
+    
     async def handle_action(self, choice: str) -> Optional[str]:
         if choice in self.menu_actions:
             _, action = self.menu_actions[choice]
@@ -240,7 +244,8 @@ async def main():
             choice = await menu.select_action()
             result = await menu.handle_action(choice)
 
-            os.system('pause')
+            # Use async-friendly input instead of blocking os.system('pause')
+            await menu.wait_for_user()
             
             if result == 0:
                 break
@@ -250,7 +255,8 @@ async def main():
             break
         except Exception as e:
             print(f"[!] Error: {e}")
-            os.system('pause')
+            # Use async-friendly input instead of blocking os.system('pause')
+            await menu.wait_for_user("Press Enter to continue after error...")
 
 if __name__ == "__main__":
     asyncio.run(main())

@@ -33,6 +33,14 @@ class DataType(Enum):
     BARS = "bars"
     QUOTES = "quotes"
     TRADES = "trades"
+
+class StreamConfig:
+    """Configuration for WebSocket stream connections"""
+    MAX_RETRIES = 3
+    RETRY_DELAY = 5  # seconds
+    CONNECTION_TIMEOUT = 30  # seconds
+    HEARTBEAT_INTERVAL = 30  # seconds
+    RECONNECT_DELAY = 10  # seconds
     
 class Client:
     def __init__(self, config: Dict[str, Union[str, bool]]):
@@ -46,6 +54,7 @@ class Client:
         self.stream_clients: Dict[CurrencyType, Union[CryptoDataStream, StockDataStream]] = {}
         self.hist_data: Dict[CurrencyType, pd.DataFrame] = {}
         self.new_data: Dict[CurrencyType, pd.DataFrame] = {}
+        self.stream_retry_count: Dict[CurrencyType, int] = {}
     
     def _historical_client(self, currency: CurrencyType) -> Optional[Union[CryptoHistoricalDataClient, StockHistoricalDataClient]]:
         try: 
@@ -105,7 +114,9 @@ class Client:
             if task and not task.done():
                 symbols = self.focused.get(currency, [])
                 symbol_list = ", ".join(symbols) if symbols else "none"
-                status_parts.append(f"{currency.value}: {symbol_list}")
+                retry_count = self.stream_retry_count.get(currency, 0)
+                retry_info = f" (retries: {retry_count})" if retry_count > 0 else ""
+                status_parts.append(f"{currency.value}: {symbol_list}{retry_info}")
                 active_count += 1
         
         if active_count == 0:
@@ -153,6 +164,23 @@ class Client:
         finally:
             import gc
             gc.collect()
+
+    async def _test_connection(self) -> bool:
+        """Test basic connectivity to Alpaca API"""
+        try:
+            # Test with a simple API call
+            account = await asyncio.wait_for(
+                asyncio.to_thread(self.trading_client.get_account),
+                timeout=10.0
+            )
+            print(f"[o] Connection test successful - Account: {account.account_number}")
+            return True
+        except asyncio.TimeoutError:
+            print("[!] Connection test failed - API timeout")
+            return False
+        except Exception as e:
+            print(f"[!] Connection test failed - {e}")
+            return False
 
 class Account(Client):
     def __init__(self, config: Dict[str, Union[str, bool]], name: str):
@@ -334,5 +362,9 @@ class Account(Client):
         gc.collect()
         
         return f"Stopped {stopped_count} stream(s) successfully"
+    
+    def get_stream_status(self) -> str:
+        """Public method to get stream status"""
+        return self._stream_status()
         
         
