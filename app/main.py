@@ -255,8 +255,7 @@ async def main():
             break
         except Exception as e:
             print(f"[!] Error: {e}")
-            # Use async-friendly input instead of blocking os.system('pause')
-            await menu.wait_for_user("Press Enter to continue after error...")
+            os.system('pause')
 
 if __name__ == "__main__":
     asyncio.run(main())

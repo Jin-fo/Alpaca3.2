@@ -220,38 +220,35 @@ class Account(Client):
         try:
             self.hist_data = {symbol: None for symbol in self.focused[currency]}
             method_name = f"get_{currency.value}_{data_type.value}"
-            
-            for symbol in self.focused[currency]:
-                # Create request based on data type
-                if data_type == DataType.BARS:
-                    request = request_type(
-                        symbol_or_symbols=symbol,
-                        timeframe=self._time_frame(interval), 
-                        start=self._start_time(interval),
-                    )
-                else:
-                    request = request_type(
-                        symbol_or_symbols=symbol,
-                        start=self._start_time(interval),
-                    )
-                # Add timeout to prevent hanging
-                try:
-                    response = await asyncio.wait_for(
-                        asyncio.to_thread(getattr(client_type, method_name), request),
-                        timeout=60.0
-                    )
-                except asyncio.TimeoutError:
-                    print(f"[!] API call timed out for {symbol}")
-                    self.hist_data[symbol] = None
-                    continue
-                except Exception as api_error:
-                    print(f"[!] API call failed for {symbol}: {api_error}")
-                    self.hist_data[symbol] = None
-                    continue
-                
-                # Convert response to DataFrame
-                data = response.df if hasattr(response, 'df') and response.df is not None else pd.DataFrame()
-                self.hist_data[symbol] = data
+
+            # Create request based on data type
+            if data_type == DataType.BARS:
+                request = request_type(
+                    symbol_or_symbols=self.focused[currency],
+                    timeframe=self._time_frame(interval), 
+                    start=self._start_time(interval),
+                )
+            else:
+                request = request_type(
+                    symbol_or_symbols=self.focused[currency],
+                    start=self._start_time(interval),
+                )
+            # Add timeout to prevent hanging
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(getattr(client_type, method_name), request),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                print(f"[!] API call timed out for {currency.value} {data_type.value}")
+                self.hist_data = None
+    
+            except Exception as api_error:
+                print(f"[!] API call failed for {currency.value} {data_type.value}: {api_error}")
+                self.hist_data = None
+
+    
+            self.hist_data = response
             
             return self.hist_data
             
@@ -300,14 +297,25 @@ class Account(Client):
         try:
             # Subscribe to data using dynamic method lookup
             method_name = f"subscribe_{data_type.value}"
-            symbols = self.focused[currency]
             
-            subscribe_method = getattr(stream_client, method_name)
-            subscribe_method(self._stream_update, *symbols)
+            if data_type == DataType.BARS:
+                handler = self._stream_update
+            elif data_type == DataType.QUOTES:
+                handler = self._stream_update
+            elif data_type == DataType.TRADES:
+                handler = self._stream_update
             
-            # Store the stream client for cleanup
-            self.stream_clients[currency] = stream_client
-            
+            try:
+                await asyncio.wait_for(
+                    asyncio.to_thread(getattr(stream_client, method_name), handler, *self.focused[currency]),
+                    timeout=60.0
+                )
+            except asyncio.TimeoutError:
+                print(f"[!] API call timed out")
+  
+            except Exception as e:
+                print(f"[!] Error subscribing to {currency.value} {data_type.value}: {e}")
+
             # Create async task to run the stream
             async def _run_stream():
                 try:
@@ -334,7 +342,8 @@ class Account(Client):
     async def stop_stream(self) -> str:
         """Stop all active streams with complete cleanup"""
         if not self.active_stream:
-            return "No active streams to stop"
+            print("[!] No active streams to stop")
+            return
 
         stopped_count = 0
         for currency, task in list(self.active_stream.items()):
@@ -360,8 +369,7 @@ class Account(Client):
         
         import gc
         gc.collect()
-        
-        return f"Stopped {stopped_count} stream(s) successfully"
+        return
     
     def get_stream_status(self) -> str:
         """Public method to get stream status"""
