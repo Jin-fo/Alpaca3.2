@@ -11,27 +11,29 @@ class Record:
     
     async def write(self, data: Dict[str, pd.DataFrame]) -> None:
         """Write data concurrently with one thread per file"""
-        if not data:
-            return
-            
         def _write_file(symbol: str, df: pd.DataFrame) -> None:
             """Write single file synchronously"""
             filename = f"{self.folder}/{symbol.replace('/', '_')}.csv" 
-            df.to_csv(filename)
+            df.to_csv(filename)        
 
-        write_tasks = []
-        for symbol, df in data.items():
-            if df is not None and not df.empty:
+        if not data:
+            print("[!] No data to write")
+            return
+
+        try:   
+            print(f"[o] Writing data: {list(data.keys())}")
+            write_tasks = []
+            for symbol, df in data.items():
                 task = asyncio.to_thread(_write_file, symbol, df)
                 write_tasks.append(task)
-        
-        if write_tasks:
-            await asyncio.gather(*write_tasks, return_exceptions=True)
+            
+                if write_tasks:
+                    await asyncio.gather(*write_tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"[!] Error writing data: {e}")
 
     async def read(self, symbols: Union[str, List[str]]) -> Dict[str, pd.DataFrame]:
         """Read data concurrently"""
-        if isinstance(symbols, str):
-            symbols = [symbols]
         def _read_file(symbol: str) -> Optional[pd.DataFrame]:
             """Read single file synchronously"""
             filename = f"{self.folder}/{symbol.replace('/', '_')}.csv"
@@ -55,16 +57,24 @@ class Record:
                 print(f"[!] Error reading {symbol}: {e}")
             return None
         
-        read_tasks = []
-        for symbol in symbols:
-            task = asyncio.to_thread(_read_file, symbol)
-            read_tasks.append(task)
-        
-        results = await asyncio.gather(*read_tasks, return_exceptions=True)
-        # Return as dictionary
-        return {symbol: result for symbol, result in zip(symbols, results) 
-                if isinstance(result, pd.DataFrame)}
+        if isinstance(symbols, str):
+            symbols = [symbols]
 
+        try:     
+            print(f"[o] Reading data: {symbols}")
+            read_tasks = []
+            for symbol in symbols:
+                task = asyncio.to_thread(_read_file, symbol)
+                read_tasks.append(task)
+            
+            results = await asyncio.gather(*read_tasks, return_exceptions=True)
+            # Return as dictionary
+            return {symbol: result for symbol, result in zip(symbols, results) 
+                    if isinstance(result, pd.DataFrame)}
+        except Exception as e:
+            print(f"[!] Error reading data: {e}")
+            return {}
+        
     async def append(self, data: Union[pd.DataFrame, Dict]) -> pd.DataFrame:
         df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
         

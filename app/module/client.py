@@ -33,7 +33,7 @@ class DataType(Enum):
     BARS = "bars"
     QUOTES = "quotes"
     TRADES = "trades"
-
+    
 class StreamConfig:
     """Configuration for WebSocket stream connections"""
     MAX_RETRIES = 3
@@ -130,12 +130,24 @@ class Client:
             return status_summary
         
     async def _stream_update(self, data) -> None:
+
+        # def _bar_updates():
+        #     try:
+        #     except Exception as e:
+        #         print(f"[!] Error updating bar data: {e}")
+        # def _quote_updates(): pass
+        # #
+        # def _trade_updates(): pass
+        # #symbol,timestamp,exchange,price,size,id,conditions,tape
+        # #symbol,timestamp,price,size,id
+
+
         try: 
             # Handle the incoming stream data
             symbol = getattr(data, 'symbol', 'unknown')
             timestamp = getattr(data, 'timestamp', datetime.now())
             
-            # Store the new data
+            
             self.new_data[symbol] = data
             print(f"[o] {symbol}: {data}")
         except Exception as e:
@@ -164,23 +176,7 @@ class Client:
         finally:
             import gc
             gc.collect()
-
-    async def _test_connection(self) -> bool:
-        """Test basic connectivity to Alpaca API"""
-        try:
-            # Test with a simple API call
-            account = await asyncio.wait_for(
-                asyncio.to_thread(self.trading_client.get_account),
-                timeout=10.0
-            )
-            print(f"[o] Connection test successful - Account: {account.account_number}")
-            return True
-        except asyncio.TimeoutError:
-            print("[!] Connection test failed - API timeout")
-            return False
-        except Exception as e:
-            print(f"[!] Connection test failed - {e}")
-            return False
+    
 
 class Account(Client):
     def __init__(self, config: Dict[str, Union[str, bool]], name: str):
@@ -220,35 +216,50 @@ class Account(Client):
         try:
             self.hist_data = {symbol: None for symbol in self.focused[currency]}
             method_name = f"get_{currency.value}_{data_type.value}"
-
+            
             # Create request based on data type
             if data_type == DataType.BARS:
                 request = request_type(
-                    symbol_or_symbols=self.focused[currency],
+                symbol_or_symbols=self.focused[currency],
                     timeframe=self._time_frame(interval), 
                     start=self._start_time(interval),
                 )
             else:
                 request = request_type(
-                    symbol_or_symbols=self.focused[currency],
+                symbol_or_symbols=self.focused[currency],
                     start=self._start_time(interval),
                 )
             # Add timeout to prevent hanging
             try:
+            # client_type is already an instance from _historical_client
                 response = await asyncio.wait_for(
                     asyncio.to_thread(getattr(client_type, method_name), request),
                     timeout=60.0
                 )
             except asyncio.TimeoutError:
                 print(f"[!] API call timed out for {currency.value} {data_type.value}")
-                self.hist_data = None
-    
+                return {}
             except Exception as api_error:
                 print(f"[!] API call failed for {currency.value} {data_type.value}: {api_error}")
-                self.hist_data = None
-
-    
-            self.hist_data = response
+                return {}
+            
+            # Keep multi-index DataFrame structure
+            df = response.df
+            if df is not None and not df.empty:
+                # Store the complete multi-index DataFrame for each symbol
+                self.hist_data = {
+                    symbol: df.xs(symbol, level='symbol').copy()
+                    for symbol in df.index.get_level_values('symbol').unique()
+                }
+                
+                # Add symbol back as index level for each DataFrame
+                for symbol, symbol_df in self.hist_data.items():
+                    symbol_df.index = pd.MultiIndex.from_tuples(
+                        [(symbol, idx) for idx in symbol_df.index],
+                        names=['symbol', 'timestamp']
+                    )
+            else:
+                self.hist_data = {}
             
             return self.hist_data
             
@@ -315,7 +326,7 @@ class Account(Client):
   
             except Exception as e:
                 print(f"[!] Error subscribing to {currency.value} {data_type.value}: {e}")
-
+            
             # Create async task to run the stream
             async def _run_stream():
                 try:
@@ -370,7 +381,7 @@ class Account(Client):
         import gc
         gc.collect()
         return
-    
+        
     def get_stream_status(self) -> str:
         """Public method to get stream status"""
         return self._stream_status()

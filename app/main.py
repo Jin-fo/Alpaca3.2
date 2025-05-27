@@ -19,7 +19,7 @@ class Parameters:
     stock_symbols: List[str] = None
     
     # Data Settings
-    data_type: DataType = DataType.BARS
+    data_type: DataType = DataType.QUOTES
 
     # Account Settings
     account_name: str = "main_account"
@@ -51,7 +51,7 @@ class Parameters:
     @property
     def time_config(self) -> Dict[str, Dict[str, int]]:
         return {
-            "range": {"day": 7, "hour": 0, "minute": 0},
+            "range": {"day": 0.5, "hour": 0, "minute": 0},
             "step": {"day": 0, "hour": 0, "minute": 5}
         }
     
