@@ -13,19 +13,20 @@ class Parameters:
     api_key: str = "PKE1B8WAV2KJ324ZKQKC"
     secret_key: str = "Ro7nFRclHQekQSf5Tt3zbpJAr9AaXhQ7r67sJJDy"
     paper_trading: bool = True
-    
+
+    # Account Settings
+    account_name: str = "main_account"
+
+    # Record Directory/folder name
+    record_folder: str = "data"
+
     # Trading Symbols
     crypto_symbols: List[str] = None
     stock_symbols: List[str] = None
     
     # Data Settings
-    data_type: DataType = DataType.QUOTES
+    data_type: DataType = DataType.BARS
 
-    # Account Settings
-    account_name: str = "main_account"
-    
-    # Record Directory
-    record_folder: str = "data"
     def __post_init__(self):
         self.crypto_symbols = ["BTC/USD", "ETH/USD"]
         self.stock_symbols = ["NVDA", "AAPL"]
@@ -71,6 +72,9 @@ class Application:
 
         self.record = Record(self.param.record_folder)
         self.record.set_columns(self.param.column_config)
+
+        self.crypto_data: Dict[str, pd.DataFrame] = {}
+        self.stock_data: Dict[str, pd.DataFrame] = {}
 
     async def display_status(self) -> None:
         print("\n" + "="*40)
@@ -146,7 +150,7 @@ class Application:
         
         print("="*40)
 
-    async def fetch_historical(self) -> None:
+    async def file_historical(self) -> None:
         historical_tasks = [
             self.account.fetch_historical(CurrencyType.CRYPTO, self.param.data_type, self.param.time_config),
             self.account.fetch_historical(CurrencyType.STOCK, self.param.data_type, self.param.time_config),
@@ -154,30 +158,55 @@ class Application:
         
         crypto_data, stock_data = await asyncio.gather(*historical_tasks, return_exceptions=True)
 
-        write_tasks = []
-        if crypto_data and not isinstance(crypto_data, Exception):
-            write_tasks.append(self.record.write(crypto_data))
-        if stock_data and not isinstance(stock_data, Exception):
-            write_tasks.append(self.record.write(stock_data))
+        write_tasks = [
+            self.record.write(crypto_data) if crypto_data is not None else None,
+            self.record.write(stock_data) if stock_data is not None else None
+        ]
+        await asyncio.gather(*write_tasks, return_exceptions=True)
+
+    async def sample_data(self) -> None:
+        data = await self.record.read(self.param.all_symbols)
+        if data is None:
+            print("[!] No data found in file!")
+            return
         
-        if write_tasks:
-            await asyncio.gather(*write_tasks, return_exceptions=True)
- 
-        # Read back all symbols
-        read_data = await self.record.read(self.param.all_symbols)
-        for symbol, df in read_data.items():
-            print(f"[{symbol}]")
-            print(df)
-            print("\n")
+        # Separate data by symbol type
+        for symbol, df in data.items():
+            if symbol in self.param.crypto_symbols:
+                self.crypto_data[symbol] = df
+                print(f"[o] Sampled crypto: {symbol}\n{df}")
+            elif symbol in self.param.stock_symbols:
+                self.stock_data[symbol] = df
+                print(f"[o] Sampled stock: {symbol}\n{df}")
 
     async def start_stream(self) -> None:
-        stream_tasks = [
-            self.account.start_stream(CurrencyType.CRYPTO, self.param.data_type),
-            self.account.start_stream(CurrencyType.STOCK, self.param.data_type),
-        ]
-        await asyncio.gather(*stream_tasks, return_exceptions=True) 
-    
+        self.stream_running = True
+        
+        async def _append_tasks():
+            while self.stream_running:
+                if self.account.new_data and not self.account.new_data[0].empty:
+                    await self.record.append(self.account.new_data[0])
+                    self.account.new_data.pop(0)
+                
+                await asyncio.sleep(0.1)
+        
+        # Start the streams - these methods already create tasks internally
+        await self.account.start_stream(CurrencyType.CRYPTO, self.param.data_type)
+        await self.account.start_stream(CurrencyType.STOCK, self.param.data_type)
+        
+        # Create our append task separately
+        self.append_task = asyncio.create_task(_append_tasks())
+        
+        # Return immediately to keep the menu responsive
+
     async def stop_stream(self) -> None:
+        self.stream_running = False
+        
+        # Cancel our append task
+        if hasattr(self, 'append_task') and not self.append_task.done():
+            self.append_task.cancel()
+            
+        # This will handle cancelling the stream tasks created by the client
         await self.account.stop_stream()
 
     async def exit_app(self) -> int:
@@ -192,21 +221,23 @@ class Application:
         
         print("[o] Goodbye!")
         return 0
-
+#account protection
 class Menu():
 
     class MenuOption(Enum):
         DISPLAY_STATUS = "0"
         FILE_HISTORICAL = "1"
-        START_STREAM = "2"
-        STOP_STREAM = "3"
-        EXIT = "4"
+        SAMPLE_DATA = "2"
+        START_STREAM = "3"
+        STOP_STREAM = "4"
+        EXIT = "5"
 
     def __init__(self, app: Application):
         self.app = app
         self.menu_actions: Dict[str, Tuple[str, Callable]] = {
             self.MenuOption.DISPLAY_STATUS.value: ("Display Status", self.app.display_status),
-            self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.fetch_historical),
+            self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
+            self.MenuOption.SAMPLE_DATA.value: ("Sample Data", self.app.sample_data),
             self.MenuOption.START_STREAM.value: ("Start Stream", self.app.start_stream),
             self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
             self.MenuOption.EXIT.value: ("Exit", self.app.exit_app)
@@ -215,7 +246,7 @@ class Menu():
     async def select_action(self) -> str:
         return await asyncio.get_event_loop().run_in_executor(None, lambda: input("Enter your choice: ").strip())
     
-    async def wait_for_user(self, message: str = "Press Enter to continue...") -> None:
+    async def wait_for_user(self, message: str = "Press Enter to continue...\n") -> None:
         """Non-blocking wait for user input that doesn't interfere with streams"""
         await asyncio.get_event_loop().run_in_executor(None, lambda: input(message))
     

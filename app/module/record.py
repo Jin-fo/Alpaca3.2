@@ -5,23 +5,23 @@ class Record:
         self.folder = folder
         os.makedirs(folder, exist_ok=True)
         self.columns = None
-
+        
     def set_columns(self, columns: List[str]) -> None:
         self.columns = columns
     
     async def write(self, data: Dict[str, pd.DataFrame]) -> None:
         """Write data concurrently with one thread per file"""
+        if not data:
+            print("[!] No data to write")
+
         def _write_file(symbol: str, df: pd.DataFrame) -> None:
             """Write single file synchronously"""
             filename = f"{self.folder}/{symbol.replace('/', '_')}.csv" 
+            print(f"[>] Writing path: {filename}")
             df.to_csv(filename)        
 
-        if not data:
-            print("[!] No data to write")
-            return
-
         try:   
-            print(f"[o] Writing data: {list(data.keys())}")
+            
             write_tasks = []
             for symbol, df in data.items():
                 task = asyncio.to_thread(_write_file, symbol, df)
@@ -34,39 +34,31 @@ class Record:
 
     async def read(self, symbols: Union[str, List[str]]) -> Dict[str, pd.DataFrame]:
         """Read data concurrently"""
+        if isinstance(symbols, str):
+            symbols = [symbols]
+
         def _read_file(symbol: str) -> Optional[pd.DataFrame]:
             """Read single file synchronously"""
             filename = f"{self.folder}/{symbol.replace('/', '_')}.csv"
             if not os.path.exists(filename):
                 return None
-            try:
-                # Read CSV without date parsing (faster)
-                df = pd.read_csv(filename, index_col=[0, 1])
-                # Convert timestamp index to datetime (more reliable)
-                df.index = df.index.set_levels(
-                    pd.to_datetime(df.index.levels[1]), level=1
-                )
-                # Filter columns if specified
-                if self.columns:
-                    available_cols = [col for col in self.columns if col in df.columns]
-                    if available_cols:
-                        df = df[available_cols]
-                
-                return df
-            except Exception as e:
-                print(f"[!] Error reading {symbol}: {e}")
-            return None
-        
-        if isinstance(symbols, str):
-            symbols = [symbols]
+
+            print(f"[<] Reading path: {filename}")
+            df = pd.read_csv(filename, index_col=[0, 1])
+            df.index = df.index.set_levels(
+                pd.to_datetime(df.index.levels[1]), level=1
+            )
+            if self.columns:
+                available_cols = [col for col in self.columns if col in df.columns]
+                if available_cols:
+                    df = df[available_cols]
+            return df
 
         try:     
-            print(f"[o] Reading data: {symbols}")
             read_tasks = []
-            for symbol in symbols:
+            for symbol in symbols:         
                 task = asyncio.to_thread(_read_file, symbol)
-                read_tasks.append(task)
-            
+                read_tasks.append(task) 
             results = await asyncio.gather(*read_tasks, return_exceptions=True)
             # Return as dictionary
             return {symbol: result for symbol, result in zip(symbols, results) 
@@ -75,13 +67,25 @@ class Record:
             print(f"[!] Error reading data: {e}")
             return {}
         
-    async def append(self, data: Union[pd.DataFrame, Dict]) -> pd.DataFrame:
-        df = data if isinstance(data, pd.DataFrame) else pd.DataFrame(data)
-        
-        mode = 'w' if not os.path.exists(self.filename) else 'a'
-        header = mode == 'w'
-        
-        df.to_csv(self.filename, mode=mode, header=header, index=True)
-        print(f"Appended {len(df)} records to {self.filename}")
-        return df
-        
+    async def append(self, data: pd.DataFrame) -> None:
+        """Append data to existing files"""
+        if data.empty:
+            print("[!] No data to append")
+            return
+
+        try:
+            # Get symbol from the MultiIndex
+            symbol = data.index[0][0]
+            filename = f"{self.folder}/{symbol.replace('/', '_')}.csv"
+            
+            # Determine mode and header
+            file_exists = os.path.exists(filename)
+            mode = 'a' if file_exists else 'w'
+            header = not file_exists
+            
+            # Write to CSV
+            data.to_csv(filename, mode=mode, header=header)
+            print(f"[+] Appended to {filename}")
+            
+        except Exception as e:
+            print(f"[!] Error appending data: {e}")

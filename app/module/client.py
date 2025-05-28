@@ -50,11 +50,9 @@ class Client:
             secret_key=config["SECRET_KEY"],
             paper=config["paper"]
         )
-        self.active_stream: Dict[CurrencyType, asyncio.Task] = {}
         self.stream_clients: Dict[CurrencyType, Union[CryptoDataStream, StockDataStream]] = {}
-        self.hist_data: Dict[CurrencyType, pd.DataFrame] = {}
-        self.new_data: Dict[CurrencyType, pd.DataFrame] = {}
-        self.stream_retry_count: Dict[CurrencyType, int] = {}
+        self.active_stream: Dict[CurrencyType, asyncio.Task] = {}
+        self.new_data: List[pd.DataFrame] = []
     
     def _historical_client(self, currency: CurrencyType) -> Optional[Union[CryptoHistoricalDataClient, StockHistoricalDataClient]]:
         try: 
@@ -103,53 +101,59 @@ class Client:
             return None
         
     def _stream_status(self) -> str:
-        """Get current stream status with associated symbols (read-only)"""
-        if not self.active_stream:
-            return "No active streams"
-        
-        status_parts = []
-        active_count = 0
-        
         for currency, task in self.active_stream.items():
             if task and not task.done():
-                symbols = self.focused.get(currency, [])
-                symbol_list = ", ".join(symbols) if symbols else "none"
-                retry_count = self.stream_retry_count.get(currency, 0)
-                retry_info = f" (retries: {retry_count})" if retry_count > 0 else ""
-                status_parts.append(f"{currency.value}: {symbol_list}{retry_info}")
-                active_count += 1
+                return f"{currency.value} stream is running"
+        return "No active streams"
         
-        if active_count == 0:
-            return "No active streams"
-        
-        status_summary = f"{active_count} active stream(s)"
-        if status_parts:
-            status_detail = " | ".join(status_parts)
-            return f"{status_summary} - {status_detail}"
-        else:
-            return status_summary
-        
-    async def _stream_update(self, data) -> None:
+    async def _stream_update(self, data, data_type: DataType) -> None:
+        def _bars(data):
+            content = {
+                "open": data.open,
+                "high": data.high,
+                "low": data.low,
+                "close": data.close,
+                "volume": data.volume,
+                "trade_count": data.trade_count,
+                "vwap": data.vwap
+            }
+            return content
+   
+        def _quotes(data):
+            content = {
+                "bid_price": data.bid_price,
+                "bid_size": data.bid_size,
+                "ask_price": data.ask_price,
+                "ask_size": data.ask_size
+            }
+            return content
 
-        # def _bar_updates():
-        #     try:
-        #     except Exception as e:
-        #         print(f"[!] Error updating bar data: {e}")
-        # def _quote_updates(): pass
-        # #
-        # def _trade_updates(): pass
-        # #symbol,timestamp,exchange,price,size,id,conditions,tape
-        # #symbol,timestamp,price,size,id
-
+        def _trades(data):
+            content = {
+                "price": data.price,
+                "size": data.size
+            }
+            return content
 
         try: 
             # Handle the incoming stream data
             symbol = getattr(data, 'symbol', 'unknown')
             timestamp = getattr(data, 'timestamp', datetime.now())
+            if data_type == DataType.BARS:
+                content = _bars(data)
+            elif data_type == DataType.QUOTES:
+                content = _quotes(data)
+            elif data_type == DataType.TRADES:
+                content = _trades(data)
+
+            print(f"[o] {symbol} : {timestamp}, {content}")
             
+            # Convert to DataFrame
+            df = pd.DataFrame([content], index=pd.MultiIndex.from_tuples(
+                [(symbol, timestamp)], names=['symbol', 'timestamp']
+            ))
+            self.new_data.append(df)
             
-            self.new_data[symbol] = data
-            print(f"[o] {symbol}: {data}")
         except Exception as e:
             print(f"[!] Error updating stream data: {e}")
 
@@ -177,7 +181,6 @@ class Client:
             import gc
             gc.collect()
     
-
 class Account(Client):
     def __init__(self, config: Dict[str, Union[str, bool]], name: str):
         super().__init__(config)
@@ -213,6 +216,31 @@ class Account(Client):
         if not client_type or not request_type:
             return None
         
+        def _start_time(interval: Dict) -> Optional[datetime]:
+            try:
+                range_config = interval["range"]
+                return datetime.now(ZoneInfo(self.info["zone"])) - timedelta(
+                    days=range_config["day"],
+                    hours=range_config["hour"],
+                    minutes=range_config["minute"]
+                )
+            except APIError as e:
+                print(f"[!] Error calculating start time: {e}")
+                return None
+        
+        def _time_frame(interval: Dict) -> Optional[TimeFrame]:
+            try:
+                step = interval["step"]
+                if step["day"] > 0:
+                    return TimeFrame(step["day"], TimeFrameUnit.Day)
+                elif step["hour"] > 0:
+                    return TimeFrame(step["hour"], TimeFrameUnit.Hour)
+                else:
+                    return TimeFrame(step["minute"], TimeFrameUnit.Minute)
+            except APIError as e:
+                print(f"[!] Error creating timeframe: {e}")
+            return None
+       
         try:
             self.hist_data = {symbol: None for symbol in self.focused[currency]}
             method_name = f"get_{currency.value}_{data_type.value}"
@@ -221,17 +249,16 @@ class Account(Client):
             if data_type == DataType.BARS:
                 request = request_type(
                 symbol_or_symbols=self.focused[currency],
-                    timeframe=self._time_frame(interval), 
-                    start=self._start_time(interval),
+                    timeframe=_time_frame(interval), 
+                    start=_start_time(interval),
                 )
             else:
                 request = request_type(
                 symbol_or_symbols=self.focused[currency],
-                    start=self._start_time(interval),
+                    start=_start_time(interval),
                 )
             # Add timeout to prevent hanging
             try:
-            # client_type is already an instance from _historical_client
                 response = await asyncio.wait_for(
                     asyncio.to_thread(getattr(client_type, method_name), request),
                     timeout=60.0
@@ -243,53 +270,27 @@ class Account(Client):
                 print(f"[!] API call failed for {currency.value} {data_type.value}: {api_error}")
                 return {}
             
-            # Keep multi-index DataFrame structure
             df = response.df
             if df is not None and not df.empty:
                 # Store the complete multi-index DataFrame for each symbol
-                self.hist_data = {
+                hist_data = {
                     symbol: df.xs(symbol, level='symbol').copy()
                     for symbol in df.index.get_level_values('symbol').unique()
                 }
                 
                 # Add symbol back as index level for each DataFrame
-                for symbol, symbol_df in self.hist_data.items():
+                for symbol, symbol_df in hist_data.items():
                     symbol_df.index = pd.MultiIndex.from_tuples(
                         [(symbol, idx) for idx in symbol_df.index],
                         names=['symbol', 'timestamp']
                     )
             else:
-                self.hist_data = {}
+                hist_data = {}
             
-            return self.hist_data
+            return hist_data
             
         except Exception as e:
             print(f"[!] Error fetching {currency.value} {data_type.value}: {e}")
-            return None
-        
-    def _start_time(self, interval: Dict) -> Optional[datetime]:
-        try:
-            range_config = interval["range"]
-            return datetime.now(ZoneInfo(self.info["zone"])) - timedelta(
-                days=range_config["day"],
-                hours=range_config["hour"],
-                minutes=range_config["minute"]
-            )
-        except APIError as e:
-            print(f"[!] Error calculating start time: {e}")
-            return None
-        
-    def _time_frame(self, interval: Dict) -> Optional[TimeFrame]:
-        try:
-            step = interval["step"]
-            if step["day"] > 0:
-                return TimeFrame(step["day"], TimeFrameUnit.Day)
-            elif step["hour"] > 0:
-                return TimeFrame(step["hour"], TimeFrameUnit.Hour)
-            else:
-                return TimeFrame(step["minute"], TimeFrameUnit.Minute)
-        except APIError as e:
-            print(f"[!] Error creating timeframe: {e}")
             return None
         
     async def start_stream(self, currency: CurrencyType, data_type: DataType) -> str:
@@ -308,17 +309,13 @@ class Account(Client):
         try:
             # Subscribe to data using dynamic method lookup
             method_name = f"subscribe_{data_type.value}"
-            
-            if data_type == DataType.BARS:
-                handler = self._stream_update
-            elif data_type == DataType.QUOTES:
-                handler = self._stream_update
-            elif data_type == DataType.TRADES:
-                handler = self._stream_update
+
+            async def _handler(data):
+                await self._stream_update(data, data_type)
             
             try:
                 await asyncio.wait_for(
-                    asyncio.to_thread(getattr(stream_client, method_name), handler, *self.focused[currency]),
+                    asyncio.to_thread(getattr(stream_client, method_name), _handler, *self.focused[currency]),
                     timeout=60.0
                 )
             except asyncio.TimeoutError:
