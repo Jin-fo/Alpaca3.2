@@ -34,14 +34,6 @@ class DataType(Enum):
     QUOTES = "quotes"
     TRADES = "trades"
     
-class StreamConfig:
-    """Configuration for WebSocket stream connections"""
-    MAX_RETRIES = 3
-    RETRY_DELAY = 5  # seconds
-    CONNECTION_TIMEOUT = 30  # seconds
-    HEARTBEAT_INTERVAL = 30  # seconds
-    RECONNECT_DELAY = 10  # seconds
-    
 class Client:
     def __init__(self, config: Dict[str, Union[str, bool]]):
         self.config = config

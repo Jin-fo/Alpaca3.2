@@ -5,6 +5,7 @@ class Record:
         self.folder = folder
         os.makedirs(folder, exist_ok=True)
         self.columns = None
+        #self.file_path : Dict[str, str] = {}
         
     def set_columns(self, columns: List[str]) -> None:
         self.columns = columns
@@ -21,7 +22,6 @@ class Record:
             df.to_csv(filename)        
 
         try:   
-            
             write_tasks = []
             for symbol, df in data.items():
                 task = asyncio.to_thread(_write_file, symbol, df)

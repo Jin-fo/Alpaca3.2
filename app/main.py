@@ -1,7 +1,7 @@
 from head import *
 from module.client import Account, DataType, CurrencyType
 from module.record import Record
-from module.model import Model, LSTM
+from module.model import Model
 import os
 
 
@@ -15,10 +15,11 @@ class Parameters:
     paper_trading: bool = True
 
     # Account Settings
-    account_name: str = "main_account"
-
+    account_name: str = "Paper Account"
+    model_name: str = "LSTM Model"
     # Record Directory/folder name
     record_folder: str = "data"
+    model_folder: str = "models"
 
     # Trading Symbols
     crypto_symbols: List[str] = None
@@ -62,6 +63,17 @@ class Parameters:
     # bar: timestamp, open, high, low, close, volume, trade_count, vwap
     # quote: timestamp, ask, bid, ask_size, bid_size
     # trade: timestamp, price, size, exchange
+    @property
+    def lstm_config(self) -> Dict[str, Dict[str, int]]:
+        return {
+            "sequence_length": 60,
+            "train_split": 0.8,
+            "batch_size": 16,
+            "epochs": 1,
+            "learning_rate": 0.001,
+            "loss": "mean_squared_error",
+            "optimizer": "adam"
+        }
 
 class Application:
     def __init__(self):
@@ -72,6 +84,9 @@ class Application:
 
         self.record = Record(self.param.record_folder)
         self.record.set_columns(self.param.column_config)
+
+        self.model = Model(self.param.model_folder).LSTM(self.param.model_name, self.param.lstm_config)
+        self.model.set_dimension(self.param.column_config)
 
         self.crypto_data: Dict[str, pd.DataFrame] = {}
         self.stock_data: Dict[str, pd.DataFrame] = {}
@@ -149,7 +164,9 @@ class Application:
                 print()
         
         print("="*40)
-
+    
+    #def update_parameters(self, **kwargs) -> None:
+     
     async def file_historical(self) -> None:
         historical_tasks = [
             self.account.fetch_historical(CurrencyType.CRYPTO, self.param.data_type, self.param.time_config),
@@ -164,7 +181,7 @@ class Application:
         ]
         await asyncio.gather(*write_tasks, return_exceptions=True)
 
-    async def sample_data(self) -> None:
+    async def load_historical(self) -> None:
         data = await self.record.read(self.param.all_symbols)
         if data is None:
             print("[!] No data found in file!")
@@ -179,7 +196,7 @@ class Application:
                 self.stock_data[symbol] = df
                 print(f"[o] Sampled stock: {symbol}\n{df}")
 
-    async def start_stream(self) -> None:
+    async def run_stream(self) -> None:
         self.stream_running = True
         
         async def _append_tasks():
@@ -197,8 +214,6 @@ class Application:
         # Create our append task separately
         self.append_task = asyncio.create_task(_append_tasks())
         
-        # Return immediately to keep the menu responsive
-
     async def stop_stream(self) -> None:
         self.stream_running = False
         
@@ -207,7 +222,21 @@ class Application:
             self.append_task.cancel()
             
         # This will handle cancelling the stream tasks created by the client
-        await self.account.stop_stream()
+        await self.account.end_stream()
+    
+    async def run_model(self) -> None:
+        self.model.build()
+        train_tasks = [
+            self.model.train(self.crypto_data),
+            self.model.train(self.stock_data)
+        ]
+        await asyncio.gather(*train_tasks, return_exceptions=True)
+        
+
+        self.model.operate()
+
+    async def stop_model(self) -> None:
+        self.model.save()
 
     async def exit_app(self) -> int:
         print("[+] Shutting down application...")
@@ -227,19 +256,23 @@ class Menu():
     class MenuOption(Enum):
         DISPLAY_STATUS = "0"
         FILE_HISTORICAL = "1"
-        SAMPLE_DATA = "2"
-        START_STREAM = "3"
+        LOAD_HISTORICAL = "2"
+        RUN_STREAM = "3"
         STOP_STREAM = "4"
-        EXIT = "5"
+        RUN_MODEL = "5"
+        STOP_MODEL = "6"
+        EXIT = "7"
 
     def __init__(self, app: Application):
         self.app = app
         self.menu_actions: Dict[str, Tuple[str, Callable]] = {
             self.MenuOption.DISPLAY_STATUS.value: ("Display Status", self.app.display_status),
             self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
-            self.MenuOption.SAMPLE_DATA.value: ("Sample Data", self.app.sample_data),
-            self.MenuOption.START_STREAM.value: ("Start Stream", self.app.start_stream),
+            self.MenuOption.LOAD_HISTORICAL.value: ("Load Historical", self.app.load_historical),
+            self.MenuOption.RUN_STREAM.value: ("Run Stream", self.app.run_stream),
             self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
+            self.MenuOption.RUN_MODEL.value: ("Run Model", self.app.run_model),
+            self.MenuOption.STOP_MODEL.value: ("Stop Model", self.app.stop_model),
             self.MenuOption.EXIT.value: ("Exit", self.app.exit_app)
         }
 
