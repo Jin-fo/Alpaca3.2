@@ -16,7 +16,7 @@ class Parameters:
 
     # Account Settings
     account_name: str = "Paper Account"
-    model_name: str = "LSTM Model"
+    model_name: str = "LSTM"
     # Record Directory/folder name
     record_folder: str = "data"
     model_folder: str = "models"
@@ -53,13 +53,13 @@ class Parameters:
     @property
     def time_config(self) -> Dict[str, Dict[str, int]]:
         return {
-            "range": {"day": 0.5, "hour": 0, "minute": 0},
+            "range": {"day": 5, "hour": 0, "minute": 0},
             "step": {"day": 0, "hour": 0, "minute": 5}
         }
     
     @property
     def column_config(self) -> List[str]:
-        return ["timestamp", "open", "high", "low", "close"] 
+        return ["open", "high", "low", "close", "volume", "trade_count"] 
     # bar: timestamp, open, high, low, close, volume, trade_count, vwap
     # quote: timestamp, ask, bid, ask_size, bid_size
     # trade: timestamp, price, size, exchange
@@ -68,9 +68,11 @@ class Parameters:
         return {
             "sequence_length": 60,
             "train_split": 0.8,
-            "batch_size": 16,
-            "epochs": 1,
+            "batch_size": 16, #generalization of data, increase batch size relative to dataset size 1:10
+            "epochs": 1, #passes through the data, high epochs on large dataset may lead to overfitting
             "learning_rate": 0.001,
+            "lstm_units": [50, 50],  # hidden(50, 50) layers of lstm type
+            "dense_units": [25, 25, 1],  # hidden(25, 25) + output layer(1) of dense type
             "loss": "mean_squared_error",
             "optimizer": "adam"
         }
@@ -86,7 +88,6 @@ class Application:
         self.record.set_columns(self.param.column_config)
 
         self.model = Model(self.param.model_folder).LSTM(self.param.model_name, self.param.lstm_config)
-        self.model.set_dimension(self.param.column_config)
 
         self.crypto_data: Dict[str, pd.DataFrame] = {}
         self.stock_data: Dict[str, pd.DataFrame] = {}
@@ -224,16 +225,29 @@ class Application:
         # This will handle cancelling the stream tasks created by the client
         await self.account.end_stream()
     
-    async def run_model(self) -> None:
-        self.model.build()
-        train_tasks = [
-            self.model.train(self.crypto_data),
-            self.model.train(self.stock_data)
-        ]
-        await asyncio.gather(*train_tasks, return_exceptions=True)
-        
+    async def create_model(self) -> None:
+        build_tasks = []
+        for symbol, df in self.crypto_data.items():
+            build_tasks.append(self.model.build(symbol, df))
 
-        self.model.operate()
+        for symbol, df in self.stock_data.items():
+            build_tasks.append(self.model.build(symbol, df))
+
+        await asyncio.gather(*build_tasks, return_exceptions=True)
+
+    async def run_model(self) -> None:
+        try:
+            train_tasks = []
+            for symbol in self.crypto_data.keys():
+                train_tasks.append(self.model.train(symbol))
+
+            for symbol in self.stock_data.keys():
+                train_tasks.append(self.model.train(symbol))
+
+            await asyncio.gather(*train_tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"[!] Error: {e}")
+            os.system('pause')
 
     async def stop_model(self) -> None:
         self.model.save()
@@ -259,9 +273,10 @@ class Menu():
         LOAD_HISTORICAL = "2"
         RUN_STREAM = "3"
         STOP_STREAM = "4"
-        RUN_MODEL = "5"
-        STOP_MODEL = "6"
-        EXIT = "7"
+        CREATE_MODEL = "5"
+        RUN_MODEL = "6"
+        STOP_MODEL = "7"
+        EXIT = "8"
 
     def __init__(self, app: Application):
         self.app = app
@@ -270,8 +285,9 @@ class Menu():
             self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
             self.MenuOption.LOAD_HISTORICAL.value: ("Load Historical", self.app.load_historical),
             self.MenuOption.RUN_STREAM.value: ("Run Stream", self.app.run_stream),
-            self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
+            self.MenuOption.CREATE_MODEL.value: ("Create Model", self.app.create_model),
             self.MenuOption.RUN_MODEL.value: ("Run Model", self.app.run_model),
+            self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
             self.MenuOption.STOP_MODEL.value: ("Stop Model", self.app.stop_model),
             self.MenuOption.EXIT.value: ("Exit", self.app.exit_app)
         }

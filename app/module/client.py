@@ -339,7 +339,7 @@ class Account(Client):
         except Exception as e:
             return f"Failed to start {currency.value} stream: {str(e)}"
 
-    async def stop_stream(self) -> str:
+    async def end_stream(self) -> str:
         """Stop all active streams with complete cleanup"""
         if not self.active_stream:
             print("[!] No active streams to stop")

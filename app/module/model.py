@@ -13,24 +13,65 @@ class Model:
         self.folder = folder
         os.makedirs(folder, exist_ok=True)
         self.scaler = MinMaxScaler(feature_range=(0, 1))
-        self.columns = None
+        self.config = None
+        self.model_list : dict[str, any] = {}
 
-    def set_columns(self, columns: List[str]) -> None:
-        self.columns = columns
-
-    def preprocess(self, data: pd.DataFrame) -> Dict[str, np.ndarray]:
-        if not self.columns:
-            print("[!] No columns to process")
+    def get_model(self, symbol: str) -> any:
+        try:
+            return self.model_list.get(symbol)
+        except Exception as e:
+            print(f"Error getting model: {e}")
             return None
-        print(f"begin preprocess data for {data.index[0]}")
+    
+    def clear_model(self,) -> None:
+        self.model_list = {}
+    
+    def preprocess(self, data: pd.DataFrame) -> pd.DataFrame:
+        def _flatten_timestamp(data: pd.DataFrame) -> pd.DataFrame:
+            try:
+                timestamps = data.index.get_level_values('timestamp')
+                reference = timestamps[0]
+                minutes = (timestamps - reference).total_seconds() / 60
+                new_index = pd.MultiIndex.from_arrays([minutes], names=['timestamp'])
+                data.index = new_index
+                data = data.reset_index(level='timestamp')
+                return data
+            except Exception as e:
+                print(f"Error flattening timestamp: {e}")
+                return data
+        
+        if data is None or data.empty:
+            print("[!] No data to process")
+            return None
+        
+        print(f"[>] Preprocessing data for {data.index[0]}")
+        
+        data = _flatten_timestamp(data)
 
-        if len(self.columns) == 1:
-            data = data.reshape(-1, 1)
+        try:
+            self.scaled_data = self.scaler.fit_transform(data)
+            self.train_portion = int(len(self.scaled_data) * self.config['train_split'])
+            
+            x_seq, y_seq = [], []
+            for i in range(self.config['sequence_length'], len(self.scaled_data)):
+                if self.scaled_data.shape[1] == 1:
+                    x_seq.append(self.scaled_data[i-self.config['sequence_length']:i, 0])
+                else:
+                    x_seq.append(self.scaled_data[i-self.config['sequence_length']:i, :])
+                y_seq.append(self.scaled_data[i, :])
+            
+            x_train, y_train = np.array(x_seq), np.array(y_seq)
 
-        self.scaled_data = self.scaler.fit_transform(data)
-        self.train_portion = int(len(self.scaled_data) * self.config['train_split'])
+            if len(x_train.shape) == 2:
+                x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
+                
+            return x_train,  y_train
+        except Exception as e:
+            print(f"Error preprocess data: {e}")
+            return None
 
-        return self.scaled_data
+    def postprocess(self, data: pd.DataFrame) -> pd.DataFrame:
+        pass
 
     def save(self, name: str) -> None:
         self.model.save(f"{self.folder}/{name}.keras")
@@ -39,6 +80,7 @@ class Model:
         self.model = load_model(f"{self.folder}/{name}.keras")
     
     def LSTM(self, name: str, config: Dict[str, int]):
+        self.config = config
         return LSTMModel(name, config, self)
 
 
@@ -47,57 +89,98 @@ class LSTMModel:
         self.shared = shared
         self.name = name
         self.config = config
-        self.model = Sequential(name=name)
         
+        self.symbol = None
         self.x_train = None
         self.y_train = None
-        self.train_length = 0
+        self.model = None
+
+    async def build(self, symbol: str, df: pd.DataFrame) -> None:
+        def _add_layer(model: any, x_train: np.ndarray) -> any:
+            input_shape = x_train.shape[1:]
+            #add input layer
+            self.model.add(InputLayer(shape=input_shape))
+
+            #add lstm layers
+            for i, units in enumerate(self.config['lstm_units']):
+                return_sequences = i < len(self.config['lstm_units']) - 1
+                self.model.add(KerasLSTM(units, return_sequences=return_sequences))
+
+            #add dense layers
+            for units in self.config['dense_units'][:-1]:
+                self.model.add(Dense(units, activation='relu'))
+            #add output layer
+            self.model.add(Dense(self.config['dense_units'][-1]))
+            return self.model
         
-    def set_dimension(self, columns: List[str]) -> None:
-        self.shared.set_columns(columns)
+        if '/' in symbol:
+            symbol = symbol.replace('/', '_')
         
-    def build(self):
-        self.model.compile(
-            optimizer=Adam(learning_rate=self.config['learning_rate']), 
-            loss=self.config['loss']
-        )
-        self.model.summary()
-        
-    async def train(self, data: Dict[str, pd.DataFrame]) -> Dict[str, float]:
-        if data is None or len(data) == 0:
+        try:
+            self.model = Sequential(name=f"{self.name}_{symbol}")
+
+            self.x_train, self.y_train = self.shared.preprocess(df)
+
+            self.model = _add_layer(self.model, self.x_train)
+            self.model.compile(
+                optimizer=Adam(learning_rate=self.config['learning_rate']), 
+                loss=self.config['loss']
+            )
+            self.model.summary()
+
+            self.shared.model_list[symbol] = self
+
+        except Exception as e:
+            print(f"Error building model: {e}")
+
+    async def train(self, symbol: str) -> None:
+        if '/' in symbol:
+            symbol = symbol.replace('/', '_')
+        try:
+            self.symbol = symbol
+            self.model = self.shared.get_model(symbol).model
+            self.x_train = self.shared.get_model(symbol).x_train
+            self.y_train = self.shared.get_model(symbol).y_train
+        except Exception as e:
+            print(f"Error training model: {e}")
+            return
+
+        if self.x_train is None or self.y_train is None:
             print("[!] No data to process")
-            return None
+            return
         
-        history = {}
-        for symbol, df in data.items():
-            x_train, y_train = self.shared.preprocess(df)
-            
+        print(f"Training model {self.name}_{self.symbol}")
+        
+        try:
             model_checkpoint = ModelCheckpoint(
-                filepath=f"{self.folder}/{self.name}_{symbol}.keras",
+                filepath=f"{self.shared.folder}/{self.name}_{self.symbol}.keras",
                 monitor='val_loss',
                 save_best_only=True,
                 save_weights_only=False,
                 mode='min'
             )
-            
+        
             history = self.model.fit(
-                x_train, y_train, 
+                self.x_train, self.y_train, 
                 batch_size=self.config['batch_size'],
                 epochs=self.config['epochs'],
-                validation_split=0.1,
+                validation_split=0.1, # 10% of data for validation
                 verbose=1,
                 callbacks=[model_checkpoint]
             )
-            history[symbol] = history.history
-        return history
+            print(f"history: {history.history}")
+
+        except Exception as e:
+            print(f"Error training model: {e}")
+            return None
 
     def test(self):
         result = self.model.evaluate(self.x_test, self.y_test, verbose=2)
         return result
 
     def operate(self):
-        guess = self.model.predict(self.x_test)
-        return guess
+        self.model.summary()
+        pass
         
     def save(self) -> None:
         self.model.save(f"{self.folder}/{self.name}.keras")
