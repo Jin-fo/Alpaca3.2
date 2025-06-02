@@ -40,19 +40,16 @@ class LSTM:
                 optimizer=Adam(learning_rate=self.config['learning_rate']), 
                 loss=self.config['loss']
             )
-            self.model.summary()
+            print(f"[>] Model built: {self.model}")
 
-            print(f"Loading model for {self.name}")
         except Exception as e:
-            print(f"Error building model: {e}")
+            print(f"[!] Error building model: {e}")
             return None
         
     def train(self) -> None:
         if self.dataset['x_train'] is None or self.dataset['y_train'] is None:
             print("[!] No data to process")
             return
-        
-        print(f"Training model {self.name}")
         
         try:
             model_checkpoint = ModelCheckpoint(
@@ -69,13 +66,14 @@ class LSTM:
                 batch_size=self.config['batch_size'],
                 epochs=self.config['epochs'],
                 validation_split=0.1, # last 10% of data for validation
-                verbose=1,
+                verbose=0,
                 callbacks=[model_checkpoint]
             )
-            print(f"history: {history.history}")
+            print(f"[>] Training loss: {history.history['loss'][-1]}")
+            print(f"[>] Validation loss: {history.history['val_loss'][-1]}")
 
         except Exception as e:
-            print(f"Error training model: {e}")
+            print(f"[!] Error training model: {e}")
             return None
 
     def test(self) -> None:
@@ -83,14 +81,12 @@ class LSTM:
             print("[!] No data to process")
             return
         
-        print(f"Assessing model {self.name}")
-        
         try:
-            result = self.model.evaluate(self.dataset['x_test'], self.dataset['y_test'], verbose=2)
-            print(f"{self.model.name} result: {result}")
-            return result
+            result = self.model.evaluate(self.dataset['x_test'], self.dataset['y_test'], verbose=0)
+            print(f"[>] Test loss: {result}")
+            
         except Exception as e:
-            print(f"Error assessing model: {e}")
+            print(f"[!] Error assessing model: {e}")
             return None
         
     def operate(self) -> None:
@@ -116,7 +112,7 @@ class Model:
         os.makedirs(folder, exist_ok=True)
         self.scaler = MinMaxScaler(feature_range=(0, 1))
         self.config = None
-        self.model_list : dict[str, any] = {}
+        self.model_dict : dict[str, any] = {}
 
     def preprocess(self, data: pd.DataFrame) -> None:
         def _flatten_timestamp(data: pd.DataFrame) -> pd.DataFrame:
@@ -174,41 +170,34 @@ class Model:
         if '/' in symbol:
             symbol = symbol.replace('/', '_')
         
-        if symbol in self.model_list.keys():
-            print(f"Model {symbol} already exists")
-            return None
-        
         if config['model_type'] == "LSTM":
-            self.model_list[symbol] = LSTM(symbol, config)
-            # Set the folder attribute to be used in train
-            self.model_list[symbol].folder = self.folder
-            # Store the config for use in preprocess method
+            self.model_dict.update({symbol: LSTM(symbol, config)})
+            self.model_dict[symbol].folder = self.folder
             self.config = config
-            print(f"Created model {self.model_list[symbol].name}")
+            print(f"[>] Created model {self.model_dict[symbol].name}")
         else:
-            print(f"Model type {config['model_type']} not supported")
+            print(f"[!] Model type {config['model_type']} not supported")
             return None
     
     async def source(self, symbol: str, data: pd.DataFrame) -> None:
         if '/' in symbol:
             symbol = symbol.replace('/', '_')
         
-        if symbol not in self.model_list.keys():
-            print(f"Model {symbol} does not exist")
+        if symbol not in self.model_dict.keys():
+            print(f"[!] Model {symbol} does not exist")
             return None
 
-        self.model_list[symbol].dataset = self.preprocess(data)
-
-        self.model_list[symbol].build()
-        self.model_list[symbol].train()
-        self.model_list[symbol].test()
+        self.model_dict[symbol].dataset = self.preprocess(data)
+        self.model_dict[symbol].build()
+        self.model_dict[symbol].train()
+        self.model_dict[symbol].test()
 
     async def assess(self, symbol: str) -> None:
         if '/' in symbol:
             symbol = symbol.replace('/', '_')
         
-        if symbol not in self.model_list.keys():
+        if symbol not in self.model_dict.keys():
             print(f"Model {symbol} does not exist")
             return None
 
-        self.model_list[symbol].test()
+        self.model_dict[symbol].test()
