@@ -66,6 +66,7 @@ class Parameters:
     @property
     def lstm_config(self) -> Dict[str, Dict[str, int]]:
         return {
+            "model_type": "LSTM",
             "sequence_length": 60,
             "train_split": 0.8,
             "batch_size": 16, #generalization of data, increase batch size relative to dataset size 1:10
@@ -87,7 +88,7 @@ class Application:
         self.record = Record(self.param.record_folder)
         self.record.set_columns(self.param.column_config)
 
-        self.model = Model(self.param.model_folder).LSTM(self.param.model_name, self.param.lstm_config)
+        self.model = Model(self.param.model_folder)
 
         self.crypto_data: Dict[str, pd.DataFrame] = {}
         self.stock_data: Dict[str, pd.DataFrame] = {}
@@ -227,27 +228,37 @@ class Application:
     
     async def create_model(self) -> None:
         build_tasks = []
-        for symbol, df in self.crypto_data.items():
-            build_tasks.append(self.model.build(symbol, df))
+        for symbol in self.crypto_data.keys():
+            build_tasks.append(self.model.create(symbol, self.param.lstm_config))
 
-        for symbol, df in self.stock_data.items():
-            build_tasks.append(self.model.build(symbol, df))
+        for symbol in self.stock_data.keys():
+            build_tasks.append(self.model.create(symbol, self.param.lstm_config))
 
         await asyncio.gather(*build_tasks, return_exceptions=True)
 
     async def run_model(self) -> None:
         try:
             train_tasks = []
-            for symbol in self.crypto_data.keys():
-                train_tasks.append(self.model.train(symbol))
+            for symbol, df in self.crypto_data.items():
+                train_tasks.append(self.model.source(symbol, df))
 
-            for symbol in self.stock_data.keys():
-                train_tasks.append(self.model.train(symbol))
+            for symbol, df in self.stock_data.items():
+                train_tasks.append(self.model.source(symbol, df))
 
             await asyncio.gather(*train_tasks, return_exceptions=True)
         except Exception as e:
             print(f"[!] Error: {e}")
             os.system('pause')
+
+    async def verify_model(self) -> None:
+        test_tasks = []
+        for symbol in self.crypto_data.keys():
+            test_tasks.append(self.model.assess(symbol))
+
+        for symbol in self.stock_data.keys():
+            test_tasks.append(self.model.assess(symbol))
+
+        await asyncio.gather(*test_tasks, return_exceptions=True)
 
     async def stop_model(self) -> None:
         self.model.save()
@@ -275,8 +286,9 @@ class Menu():
         STOP_STREAM = "4"
         CREATE_MODEL = "5"
         RUN_MODEL = "6"
-        STOP_MODEL = "7"
-        EXIT = "8"
+        VERIFY_MODEL = "7"
+        STOP_MODEL = "8"
+        EXIT = "9"
 
     def __init__(self, app: Application):
         self.app = app
@@ -285,9 +297,10 @@ class Menu():
             self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
             self.MenuOption.LOAD_HISTORICAL.value: ("Load Historical", self.app.load_historical),
             self.MenuOption.RUN_STREAM.value: ("Run Stream", self.app.run_stream),
+            self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
             self.MenuOption.CREATE_MODEL.value: ("Create Model", self.app.create_model),
             self.MenuOption.RUN_MODEL.value: ("Run Model", self.app.run_model),
-            self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
+            self.MenuOption.VERIFY_MODEL.value: ("Verify Model", self.app.verify_model),
             self.MenuOption.STOP_MODEL.value: ("Stop Model", self.app.stop_model),
             self.MenuOption.EXIT.value: ("Exit", self.app.exit_app)
         }
