@@ -198,23 +198,26 @@ class Application:
                 self.stock_data[symbol] = df
                 print(f"[o] Sampled stock: {symbol}\n{df}")
 
+    async def update_tasks(self) -> None:
+        while self.stream_running:
+            if self.account.new_data and not self.account.new_data[0].empty:
+                await self.record.append(self.account.new_data[0])
+                
+            if self.model_running: # Update the model
+                await self.model.predict(self.account.new_data[0])
+
+            self.account.new_data.pop(0)
+            await asyncio.sleep(0.1)
+
     async def run_stream(self) -> None:
         self.stream_running = True
-        
-        async def _append_tasks():
-            while self.stream_running:
-                if self.account.new_data and not self.account.new_data[0].empty:
-                    await self.record.append(self.account.new_data[0])
-                    self.account.new_data.pop(0)
-                
-                await asyncio.sleep(0.1)
         
         # Start the streams - these methods already create tasks internally
         await self.account.start_stream(CurrencyType.CRYPTO, self.param.data_type)
         await self.account.start_stream(CurrencyType.STOCK, self.param.data_type)
         
         # Create our append task separately
-        self.append_task = asyncio.create_task(_append_tasks())
+        self.append_task = asyncio.create_task(self.update_tasks())
         
     async def stop_stream(self) -> None:
         self.stream_running = False
@@ -237,18 +240,15 @@ class Application:
         await asyncio.gather(*build_tasks, return_exceptions=True)
 
     async def run_model(self) -> None:
-        try:
-            train_tasks = []
-            for symbol, df in self.crypto_data.items():
-                train_tasks.append(self.model.source(symbol, df))
+        self.model_running = True
+        train_tasks = []
+        for symbol, df in self.crypto_data.items():
+            train_tasks.append(self.model.source(symbol, df))
 
-            for symbol, df in self.stock_data.items():
-                train_tasks.append(self.model.source(symbol, df))
+        for symbol, df in self.stock_data.items():
+            train_tasks.append(self.model.source(symbol, df))
 
-            await asyncio.gather(*train_tasks, return_exceptions=True)
-        except Exception as e:
-            print(f"[!] Error: {e}")
-            os.system('pause')
+        await asyncio.gather(*train_tasks, return_exceptions=True)
 
     async def verify_model(self) -> None:
         test_tasks = []
@@ -261,6 +261,7 @@ class Application:
         await asyncio.gather(*test_tasks, return_exceptions=True)
 
     async def stop_model(self) -> None:
+        self.model_running = False
         self.model.save()
 
     async def exit_app(self) -> int:

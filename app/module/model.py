@@ -14,12 +14,16 @@ class LSTM:
         self.folder = None  # Add folder attribute to be set by Model class
         self.name = f"LSTM_{symbol}"
         self.model = Sequential(name=f"{self.name}")
+        self.built = False
         self.config = config
         self.dataset : dict[str, np.ndarray] = {}
         
     def build(self) -> None:
-        def _add_layer(x_train: np.ndarray) -> any:
+        def _add_layer(x_train: np.ndarray) -> Sequential:
+            print(f"[>] Building model with input shape: {x_train.shape}")
+            
             input_shape = x_train.shape[1:]
+            
             #add input layer
             self.model.add(InputLayer(shape=input_shape))
 
@@ -34,21 +38,33 @@ class LSTM:
             #add output layer
             self.model.add(Dense(self.config['dense_units'][-1]))
             return self.model
+        
         try:
+            if 'x_train' not in self.dataset or self.dataset['x_train'] is None:
+                print(f"[!] No training data available for building model")
+                return None
+            
+            # Reset the model to avoid adding layers to an existing model
+            self.model = Sequential(name=f"{self.name}")
+                
             self.model = _add_layer(self.dataset['x_train'])
             self.model.compile(
                 optimizer=Adam(learning_rate=self.config['learning_rate']), 
                 loss=self.config['loss']
             )
             print(f"[>] Model built: {self.model}")
-
+            self.built = True
         except Exception as e:
             print(f"[!] Error building model: {e}")
             return None
         
     def train(self) -> None:
-        if self.dataset['x_train'] is None or self.dataset['y_train'] is None:
+        if 'x_train' not in self.dataset or self.dataset['x_train'] is None or 'y_train' not in self.dataset or self.dataset['y_train'] is None:
             print("[!] No data to process")
+            return
+        
+        if not self.built or self.model is None:
+            print("[!] Model not built properly. Cannot train.")
             return
         
         try:
@@ -69,21 +85,25 @@ class LSTM:
                 verbose=0,
                 callbacks=[model_checkpoint]
             )
-            print(f"[>] Training loss: {history.history['loss'][-1]}")
-            print(f"[>] Validation loss: {history.history['val_loss'][-1]}")
+            print(f"[o] Training loss: {history.history['loss'][-1]}")
+            print(f"[o] Validation loss: {history.history['val_loss'][-1]}")
 
         except Exception as e:
             print(f"[!] Error training model: {e}")
             return None
 
     def test(self) -> None:
-        if self.dataset['x_test'] is None or self.dataset['y_test'] is None:
+        if 'x_test' not in self.dataset or self.dataset['x_test'] is None or 'y_test' not in self.dataset or self.dataset['y_test'] is None:
             print("[!] No data to process")
+            return
+        
+        if not self.built or self.model is None:
+            print("[!] Model not built properly. Cannot test.")
             return
         
         try:
             result = self.model.evaluate(self.dataset['x_test'], self.dataset['y_test'], verbose=0)
-            print(f"[>] Test loss: {result}")
+            print(f"[o] Test loss: {result}")
             
         except Exception as e:
             print(f"[!] Error assessing model: {e}")
@@ -91,12 +111,12 @@ class LSTM:
         
     def operate(self) -> None:
         """Generate predictions using the trained model"""
-        if not hasattr(self, 'model') or self.model is None:
+        if not self.built or self.model is None:
             print("[!] Model not built. Cannot operate.")
             return
             
         try:
-            print(f"[o] Running model: {self.name}")
+            print(f"[>] Running model: {self.name}")
             self.model.summary()
             
             # Here you could add code to make predictions
@@ -104,6 +124,10 @@ class LSTM:
             # For example, making future predictions based on the latest data
         except Exception as e:
             print(f"[!] Error operating model: {e}")
+
+    def is_built(self) -> bool:
+        """Check if the model has been built successfully"""
+        return self.built
 
 
 class Model:
@@ -114,71 +138,86 @@ class Model:
         self.config = None
         self.model_dict : dict[str, any] = {}
 
-    def preprocess(self, data: pd.DataFrame) -> None:
+    def preprocess(self, data: pd.DataFrame) -> dict[str, np.ndarray] | None:
+    
         def _flatten_timestamp(data: pd.DataFrame) -> pd.DataFrame:
-            try:
-                timestamps = data.index.get_level_values('timestamp')
-                reference = timestamps[0]
-                minutes = (timestamps - reference).total_seconds() / 60
-                new_index = pd.MultiIndex.from_arrays([minutes], names=['timestamp'])
-                data.index = new_index
+            if 'timestamp' not in data.columns:
                 data = data.reset_index(level='timestamp')
+
+            try:
+                if 'timestamp' in data.columns:
+                    ref_t = data['timestamp'].iloc[0]
+
+                minutes = [(t - ref_t).total_seconds() / 60 for t in data['timestamp']]
+
+                data['timestamp'] = minutes
                 return data
+
             except Exception as e:
-                print(f"Error flattening timestamp: {e}")
+                print(f"[!] Error flattening timestamp: {e}")
                 return data
-        
+
         if data is None or data.empty:
             print("[!] No data to process")
             return None
-        
+        print(f"-----------------------------------------------------")
         print(f"[>] Preprocessing data for {data.index[0]}")
-        
-        data = _flatten_timestamp(data)
+        print(f"[>] Data shape: {data.shape}, Columns: {data.columns}")
 
         try:
-            scaled_data = self.scaler.fit_transform(data)
+            data = _flatten_timestamp(data)
+            if 'timestamp' in data.index.names:
+                data = data.reset_index(level='timestamp')
 
-            x_seq, y_seq = [], []
-            for i in range(self.config['sequence_length'], len(scaled_data)):
-                if scaled_data.shape[1] == 1:
-                    x_seq.append(scaled_data[i-self.config['sequence_length']:i, 0])
-                else:
-                    x_seq.append(scaled_data[i-self.config['sequence_length']:i, :])
-                y_seq.append(scaled_data[i, :])
-            
-            x_train = np.array(x_seq)
-            y_train = np.array(y_seq)
-            train_length = int(len(scaled_data) * self.config['train_split'])
+            print(f"[>] After flattening: {data.shape}, Columns: {data.columns}")
 
-            x_test = x_train[train_length:]
-            y_test = y_train[train_length:]
+            data.to_csv('temp/data.csv')
+            scaled = self.scaler.fit_transform(data)
+            # NumPy arrays don't have to_csv method, using pandas to save it
+            pd.DataFrame(scaled).to_csv('temp/scaled.csv', index=False)
+            seq_len = self.config['sequence_length']
 
-            x_train = x_train[:train_length]
-            y_train = y_train[:train_length]
+            if len(scaled) <= seq_len:
+                print(f"[!] Insufficient rows: {len(scaled)} for seq_len {seq_len}")
+                return None
 
+            x_seq = []  
+            y_seq = []
+            for i in range(seq_len, len(scaled)):
+                x_seq.append(scaled[i - seq_len:i])
+                y_seq.append(scaled[i, :])
 
-            if len(x_train.shape) == 2:
-                x_train = np.reshape(x_train, (x_train.shape[0], x_train.shape[1], 1))
-                
+            x, y = np.array(x_seq), np.array(y_seq)
+
+            split = int(len(x) * self.config['train_split'])
+            if split == 0:
+                print("[!] Train split too small")
+                return None
+
+            x_train, x_test = x[:split], x[split:]
+            y_train, y_test = y[:split], y[split:]
+
+            print(f"[o] Shapes - X_train: {x_train.shape}, Y_train: {y_train.shape}, X_test: {x_test.shape}, Y_test: {y_test.shape}")
             return {"x_train": x_train, "y_train": y_train, "x_test": x_test, "y_test": y_test}
+
         except Exception as e:
-            print(f"Error preprocess data: {e}")
+            print(f"[!] Preprocessing error: {e}")
             return None
-        
+
+    
+
+    def postprocess(self, data: pd.DataFrame) -> None:
+        pass
     async def create(self, symbol: str, config: Dict[str, int]) -> None:
         if '/' in symbol:
             symbol = symbol.replace('/', '_')
         
-        if config['model_type'] == "LSTM":
-            self.model_dict.update({symbol: LSTM(symbol, config)})
-            self.model_dict[symbol].folder = self.folder
-            self.config = config
-            print(f"[>] Created model {self.model_dict[symbol].name}")
-        else:
-            print(f"[!] Model type {config['model_type']} not supported")
-            return None
-    
+        # Always recreate the model for consistency
+        self.model_dict[symbol] = LSTM(symbol, config)
+        self.model_dict[symbol].folder = self.folder
+        self.config = config
+        print(f"[>] Created model {self.model_dict[symbol].name}")
+
     async def source(self, symbol: str, data: pd.DataFrame) -> None:
         if '/' in symbol:
             symbol = symbol.replace('/', '_')
@@ -187,10 +226,18 @@ class Model:
             print(f"[!] Model {symbol} does not exist")
             return None
 
-        self.model_dict[symbol].dataset = self.preprocess(data)
-        self.model_dict[symbol].build()
+        dataset = self.preprocess(data)
+        if dataset is None:
+            print(f"[!] Failed to preprocess data for {symbol}")
+            return None
+            
+        self.model_dict[symbol].dataset = dataset
+        
+        # Check if model is already built
+        if not self.model_dict[symbol].is_built():
+            self.model_dict[symbol].build()
+            
         self.model_dict[symbol].train()
-        self.model_dict[symbol].test()
 
     async def assess(self, symbol: str) -> None:
         if '/' in symbol:
@@ -201,3 +248,6 @@ class Model:
             return None
 
         self.model_dict[symbol].test()
+
+    async def predict(self, data: pd.DataFrame) -> None:
+            return None
