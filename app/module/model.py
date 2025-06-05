@@ -116,8 +116,9 @@ class LSTM:
             
         try:
             print(f"[>] Running model: {self.name}")
-            self.model.summary()
             
+            
+            future = self.model.predict(self.dataset['x_test'][-1])
             # Here you could add code to make predictions
             # This would depend on your specific requirements
             # For example, making future predictions based on the latest data
@@ -159,6 +160,9 @@ class Model:
             print(f"{data}")
             
             data.to_csv('temp/data.csv')
+            if len(data) < 1:
+                print(f"[!] Insufficient rows: {len(data)}")
+                return None
             scaled = self.scaler.fit_transform(data)
             # NumPy arrays don't have to_csv method, using pandas to save it
             pd.DataFrame(scaled).to_csv('temp/scaled.csv', index=False)
@@ -195,6 +199,7 @@ class Model:
         pass
     async def create(self, data: pd.DataFrame, config: Dict[str, int]) -> None:
         symbol = data.index[0]
+
         if "/" in symbol:
             symbol = symbol.replace("/", "_")
         # Always recreate the model for consistency
@@ -215,6 +220,7 @@ class Model:
         self.model_dict[symbol].build()
         self.model_dict[symbol].train()
         self.model_dict[symbol].test()
+        self.model_dict[symbol].summary()
     
     async def assess(self, symbol: str) -> None:
         if "/" in symbol:
@@ -227,4 +233,19 @@ class Model:
         self.model_dict[symbol].test()
 
     async def predict(self, data: pd.DataFrame) -> None:
+        symbol = data.index[0]
+
+        if "/" in symbol:
+            symbol = symbol.replace("/", "_")
+
+        if symbol not in self.model_dict.keys():
+            print(f"Model {symbol} does not exist")
             return None
+        data = self.preprocess(data)
+        if data is None:
+            print(f"[!] Failed to preprocess data for {symbol}")
+            return None
+        self.model_dict[symbol].dataset['x_test'].append(data['x_test'])
+        self.model_dict[symbol].operate()
+
+        return None

@@ -202,7 +202,8 @@ class Application:
         while self.stream_running:
             if self.account.new_data and not self.account.new_data[0].empty:
                 await self.record.append(self.account.new_data[0])
-                
+        
+        
             if self.model_running: # Update the model
                 await self.model.predict(self.account.new_data[0])
 
