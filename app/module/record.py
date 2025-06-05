@@ -44,10 +44,7 @@ class Record:
                 return None
 
             print(f"[<] Reading path: {filename}")
-            df = pd.read_csv(filename, index_col=[0, 1])
-            df.index = df.index.set_levels(
-                pd.to_datetime(df.index.levels[1]), level=1
-            )
+            df = pd.read_csv(filename, index_col=[0])
             if self.columns:
                 available_cols = [col for col in self.columns if col in df.columns]
                 if available_cols:
@@ -75,7 +72,7 @@ class Record:
 
         try:
             # Get symbol from the MultiIndex
-            symbol = data.index[0][0]
+            symbol = data.index.name
             filename = f"{self.folder}/{symbol.replace('/', '_')}.csv"
             
             # Determine mode and header

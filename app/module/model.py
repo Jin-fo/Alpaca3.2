@@ -14,7 +14,6 @@ class LSTM:
         self.folder = None  # Add folder attribute to be set by Model class
         self.name = f"LSTM_{symbol}"
         self.model = Sequential(name=f"{self.name}")
-        self.built = False
         self.config = config
         self.dataset : dict[str, np.ndarray] = {}
         
@@ -125,11 +124,6 @@ class LSTM:
         except Exception as e:
             print(f"[!] Error operating model: {e}")
 
-    def is_built(self) -> bool:
-        """Check if the model has been built successfully"""
-        return self.built
-
-
 class Model:
     def __init__(self, folder: str):
         self.folder = folder
@@ -140,19 +134,16 @@ class Model:
 
     def preprocess(self, data: pd.DataFrame) -> dict[str, np.ndarray] | None:
     
-        def _flatten_timestamp(data: pd.DataFrame) -> pd.DataFrame:
-            if 'timestamp' not in data.columns:
-                data = data.reset_index(level='timestamp')
-
+        def _delta_timestamp(data: pd.DataFrame) -> pd.DataFrame:
             try:
-                if 'timestamp' in data.columns:
-                    ref_t = data['timestamp'].iloc[0]
-
-                minutes = [(t - ref_t).total_seconds() / 60 for t in data['timestamp']]
-
-                data['timestamp'] = minutes
+                # Convert to datetime (if not already)
+                if "delta_minute" not in data.columns:
+                    data['timestamp'] = pd.to_datetime(data['timestamp'], errors='coerce')
+                    data['timestamp'] = data['timestamp'].diff().dt.total_seconds() / 60
+                    data['timestamp'] = data['timestamp'].fillna(0)
+                    data.rename(columns={'timestamp': 'delta_minute'}, inplace=True)
+                
                 return data
-
             except Exception as e:
                 print(f"[!] Error flattening timestamp: {e}")
                 return data
@@ -160,17 +151,13 @@ class Model:
         if data is None or data.empty:
             print("[!] No data to process")
             return None
-        print(f"-----------------------------------------------------")
         print(f"[>] Preprocessing data for {data.index[0]}")
         print(f"[>] Data shape: {data.shape}, Columns: {data.columns}")
 
         try:
-            data = _flatten_timestamp(data)
-            if 'timestamp' in data.index.names:
-                data = data.reset_index(level='timestamp')
-
-            print(f"[>] After flattening: {data.shape}, Columns: {data.columns}")
-
+            data = _delta_timestamp(data)
+            print(f"{data}")
+            
             data.to_csv('temp/data.csv')
             scaled = self.scaler.fit_transform(data)
             # NumPy arrays don't have to_csv method, using pandas to save it
@@ -204,27 +191,19 @@ class Model:
             print(f"[!] Preprocessing error: {e}")
             return None
 
-    
-
     def postprocess(self, data: pd.DataFrame) -> None:
         pass
-    async def create(self, symbol: str, config: Dict[str, int]) -> None:
-        if '/' in symbol:
-            symbol = symbol.replace('/', '_')
-        
+    async def create(self, data: pd.DataFrame, config: Dict[str, int]) -> None:
+        symbol = data.index[0]
+        if "/" in symbol:
+            symbol = symbol.replace("/", "_")
         # Always recreate the model for consistency
         self.model_dict[symbol] = LSTM(symbol, config)
         self.model_dict[symbol].folder = self.folder
         self.config = config
-        print(f"[>] Created model {self.model_dict[symbol].name}")
-
-    async def source(self, symbol: str, data: pd.DataFrame) -> None:
-        if '/' in symbol:
-            symbol = symbol.replace('/', '_')
         
-        if symbol not in self.model_dict.keys():
-            print(f"[!] Model {symbol} does not exist")
-            return None
+        print(f"-----------------------------------------------------")
+        print(f"[>] Created model {self.model_dict[symbol].name}")
 
         dataset = self.preprocess(data)
         if dataset is None:
@@ -233,16 +212,14 @@ class Model:
             
         self.model_dict[symbol].dataset = dataset
         
-        # Check if model is already built
-        if not self.model_dict[symbol].is_built():
-            self.model_dict[symbol].build()
-            
+        self.model_dict[symbol].build()
         self.model_dict[symbol].train()
-
+        self.model_dict[symbol].test()
+    
     async def assess(self, symbol: str) -> None:
-        if '/' in symbol:
-            symbol = symbol.replace('/', '_')
-        
+        if "/" in symbol:
+            symbol = symbol.replace("/", "_")
+
         if symbol not in self.model_dict.keys():
             print(f"Model {symbol} does not exist")
             return None

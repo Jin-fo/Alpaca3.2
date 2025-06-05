@@ -59,7 +59,7 @@ class Parameters:
     
     @property
     def column_config(self) -> List[str]:
-        return ["open", "high", "low", "close", "volume", "trade_count"] 
+        return ["timestamp", "open", "high", "low", "close", "volume", "trade_count"] 
     # bar: timestamp, open, high, low, close, volume, trade_count, vwap
     # quote: timestamp, ask, bid, ask_size, bid_size
     # trade: timestamp, price, size, exchange
@@ -229,26 +229,16 @@ class Application:
         # This will handle cancelling the stream tasks created by the client
         await self.account.end_stream()
     
-    async def create_model(self) -> None:
-        build_tasks = []
-        for symbol in self.crypto_data.keys():
-            build_tasks.append(self.model.create(symbol, self.param.lstm_config))
-
-        for symbol in self.stock_data.keys():
-            build_tasks.append(self.model.create(symbol, self.param.lstm_config))
-
-        await asyncio.gather(*build_tasks, return_exceptions=True)
-
     async def run_model(self) -> None:
         self.model_running = True
-        train_tasks = []
-        for symbol, df in self.crypto_data.items():
-            train_tasks.append(self.model.source(symbol, df))
+        build_tasks = []
+        for df in self.crypto_data.values():
+            build_tasks.append(self.model.create(df, self.param.lstm_config))
 
-        for symbol, df in self.stock_data.items():
-            train_tasks.append(self.model.source(symbol, df))
+        for df in self.stock_data.values():
+            build_tasks.append(self.model.create(df, self.param.lstm_config))
 
-        await asyncio.gather(*train_tasks, return_exceptions=True)
+        await asyncio.gather(*build_tasks, return_exceptions=True)
 
     async def verify_model(self) -> None:
         test_tasks = []
@@ -285,11 +275,10 @@ class Menu():
         LOAD_HISTORICAL = "2"
         RUN_STREAM = "3"
         STOP_STREAM = "4"
-        CREATE_MODEL = "5"
-        RUN_MODEL = "6"
-        VERIFY_MODEL = "7"
-        STOP_MODEL = "8"
-        EXIT = "9"
+        RUN_MODEL = "5"
+        VERIFY_MODEL = "6"
+        STOP_MODEL = "7"
+        EXIT = "8"
 
     def __init__(self, app: Application):
         self.app = app
@@ -299,7 +288,6 @@ class Menu():
             self.MenuOption.LOAD_HISTORICAL.value: ("Load Historical", self.app.load_historical),
             self.MenuOption.RUN_STREAM.value: ("Run Stream", self.app.run_stream),
             self.MenuOption.STOP_STREAM.value: ("Stop Stream", self.app.stop_stream),
-            self.MenuOption.CREATE_MODEL.value: ("Create Model", self.app.create_model),
             self.MenuOption.RUN_MODEL.value: ("Run Model", self.app.run_model),
             self.MenuOption.VERIFY_MODEL.value: ("Verify Model", self.app.verify_model),
             self.MenuOption.STOP_MODEL.value: ("Stop Model", self.app.stop_model),
