@@ -197,10 +197,9 @@ class Application:
         for symbol, df in data.items():
             if symbol in self.param.crypto_symbols:
                 self.crypto_data[symbol] = df
-                print(f"[o] Sampled crypto: {symbol}\n{df}")
             elif symbol in self.param.stock_symbols:
                 self.stock_data[symbol] = df
-                print(f"[o] Sampled stock: {symbol}\n{df}")
+            #print(f"[o] Sampled {symbol}\n{df.iloc[0]}\n...\n{df.iloc[-1]}")
 
     async def update_tasks(self) -> None:
         while self.stream_running:

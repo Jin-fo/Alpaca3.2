@@ -57,7 +57,6 @@ class Record:
                 task = asyncio.to_thread(_read_file, symbol)
                 read_tasks.append(task) 
             results = await asyncio.gather(*read_tasks, return_exceptions=True)
-            # Return as dictionary
             return {symbol: result for symbol, result in zip(symbols, results) 
                     if isinstance(result, pd.DataFrame)}
         except Exception as e:

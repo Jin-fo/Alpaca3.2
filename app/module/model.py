@@ -176,7 +176,11 @@ class Model:
 
             seq_len = self.config['sequence_length']
 
-            if len(data) == seq_len+1:
+            if len(data) < seq_len+1:
+                print(f"[!] Data length is less than sequence length + 1")
+                return None
+            
+            elif len(data) == seq_len+1:
                 # Check if we have a saved scaler for this symbol
                 if symbol in self.scalers:
                     print(f"[>] Using saved scaler for {symbol}")
@@ -219,7 +223,7 @@ class Model:
                 x_train, x_test = x[:split], x[split:]
                 y_train, y_test = y[:split], y[split:]
                 # NumPy arrays don't have to_csv method, using pandas to save it
-                pd.DataFrame(scaled).to_csv(f'Scaled/History/scaled_{symbol}.csv', index=False)
+                pd.DataFrame(scaled).to_csv(f"Scaled/History/scaled_{symbol}.csv", index=False)
                 #print(f"[o] Shapes - X_train: {x_train.shape}, Y_train: {y_train.shape}, X_test: {x_test.shape}, Y_test: {y_test.shape}")
                 return {"x_train": x_train, "y_train": y_train, "x_test": x_test, "y_test": y_test}
 
