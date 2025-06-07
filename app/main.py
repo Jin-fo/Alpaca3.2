@@ -67,13 +67,14 @@ class Parameters:
     def lstm_config(self) -> Dict[str, Dict[str, int]]:
         return {
             "model_type": "LSTM",
+            "predict_future": 1,
             "sequence_length": 60,
             "train_split": 0.8,
             "batch_size": 16, #generalization of data, increase batch size relative to dataset size 1:10
             "epochs": 1, #passes through the data, high epochs on large dataset may lead to overfitting
             "learning_rate": 0.001,
             "lstm_units": [50, 50],  # hidden(50, 50) layers of lstm type
-            "dense_units": [25, 25, 1],  # hidden(25, 25) + output layer(1) of dense type
+            "dense_units": [25, 25, 7],  # hidden(25, 25) + output layer(7) to predict all features
             "loss": "mean_squared_error",
             "optimizer": "adam"
         }
@@ -89,6 +90,9 @@ class Application:
         self.record.set_columns(self.param.column_config)
 
         self.model = Model(self.param.model_folder)
+
+        self.stream_running = False
+        self.model_running = False
 
         self.crypto_data: Dict[str, pd.DataFrame] = {}
         self.stock_data: Dict[str, pd.DataFrame] = {}
@@ -200,15 +204,28 @@ class Application:
 
     async def update_tasks(self) -> None:
         while self.stream_running:
-            if self.account.new_data and not self.account.new_data[0].empty:
-                await self.record.append(self.account.new_data[0])
-        
-        
-            if self.model_running: # Update the model
-                await self.model.predict(self.account.new_data[0])
+            try:
+                if not self.account.new_data or self.account.new_data[0].empty:
+                    await asyncio.sleep(0.1)
+                    continue
 
-            self.account.new_data.pop(0)
-            await asyncio.sleep(0.1)
+                current_data = self.account.new_data[0]
+                symbol = current_data.index[0][0]  # Get symbol from MultiIndex
+                
+                # Append new data
+                await self.record.append(current_data)
+                self.account.new_data.pop(0)
+                
+                # Make prediction if model is running
+                if self.model_running:
+                    read_data = await self.record.read([symbol])
+                    if read_data:
+                        await self.model.predict(read_data[symbol])
+                
+                # Remove processed data
+            except Exception as e:
+                print(f"[!] Error in update task: {e}")
+                await asyncio.sleep(1)  # Longer sleep on error
 
     async def run_stream(self) -> None:
         self.stream_running = True

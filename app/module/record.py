@@ -72,8 +72,11 @@ class Record:
 
         try:
             # Get symbol from the MultiIndex
-            symbol = data.index.name
-            filename = f"{self.folder}/{symbol.replace('/', '_')}.csv"
+            symbol = data.index[0][0]  # Get the symbol part of the tuple
+            # Clean the symbol for filename
+            clean_symbol = symbol.replace('/', '_')
+            
+            filename = f"{self.folder}/{clean_symbol}.csv"
             
             # Determine mode and header
             file_exists = os.path.exists(filename)
@@ -81,8 +84,10 @@ class Record:
             header = not file_exists
             
             # Write to CSV
+            print(f"[+] Appending path: {filename}")
             data.to_csv(filename, mode=mode, header=header)
-            print(f"[+] Appended to {filename}")
+            
             
         except Exception as e:
             print(f"[!] Error appending data: {e}")
+            print(f"[DEBUG] Full error details: {str(e)}")

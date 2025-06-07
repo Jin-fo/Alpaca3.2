@@ -1,5 +1,6 @@
 from head import *
 import os
+import pickle
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
 from keras._tf_keras.keras.models import Sequential, load_model
@@ -16,6 +17,8 @@ class LSTM:
         self.model = Sequential(name=f"{self.name}")
         self.config = config
         self.dataset : dict[str, np.ndarray] = {}
+        self.data_input = None
+        self.scalers : dict[str, MinMaxScaler] = {}
         
     def build(self) -> None:
         def _add_layer(x_train: np.ndarray) -> Sequential:
@@ -108,7 +111,7 @@ class LSTM:
             print(f"[!] Error assessing model: {e}")
             return None
         
-    def operate(self) -> None:
+    def operate(self, data_input: dict[str, np.ndarray]) -> None:
         """Generate predictions using the trained model"""
         if not self.built or self.model is None:
             print("[!] Model not built. Cannot operate.")
@@ -117,11 +120,14 @@ class LSTM:
         try:
             print(f"[>] Running model: {self.name}")
             
+            # Reshape input to (1, sequence_length, features)
+            x_input = data_input['x_input']
+            x_input = x_input.reshape(1, x_input.shape[0], x_input.shape[1])
+            print(f"[>] Reshaped input: {x_input.shape}")
             
-            future = self.model.predict(self.dataset['x_test'][-1])
-            # Here you could add code to make predictions
-            # This would depend on your specific requirements
-            # For example, making future predictions based on the latest data
+            future = self.model.predict(x_input)
+            print(f"[o] Predicted future:\n{future}")
+            
         except Exception as e:
             print(f"[!] Error operating model: {e}")
 
@@ -132,19 +138,24 @@ class Model:
         self.scaler = MinMaxScaler(feature_range=(0, 1))
         self.config = None
         self.model_dict : dict[str, any] = {}
+        self.scalers = {}  # Dictionary to store scalers for each symbol
 
     def preprocess(self, data: pd.DataFrame) -> dict[str, np.ndarray] | None:
     
         def _delta_timestamp(data: pd.DataFrame) -> pd.DataFrame:
             try:
-                # Convert to datetime (if not already)
-                if "delta_minute" not in data.columns:
-                    data['timestamp'] = pd.to_datetime(data['timestamp'], errors='coerce')
-                    data['timestamp'] = data['timestamp'].diff().dt.total_seconds() / 60
-                    data['timestamp'] = data['timestamp'].fillna(0)
-                    data.rename(columns={'timestamp': 'delta_minute'}, inplace=True)
+                # Create explicit copy to avoid SettingWithCopyWarning
+                data_copy = data.copy()
                 
-                return data
+                # Convert to datetime (if not already)
+                if "delta_minute" not in data_copy.columns:
+                    # Convert timestamp to datetime and calculate deltas
+                    data_copy['timestamp'] = pd.to_datetime(data_copy['timestamp'], errors='coerce')
+                    data_copy['timestamp'] = data_copy['timestamp'].diff().dt.total_seconds() / 60
+                    data_copy['timestamp'] = data_copy['timestamp'].fillna(0).infer_objects(copy=False).astype('float64')
+                    data_copy = data_copy.rename(columns={'timestamp': 'delta_minute'})
+                
+                return data_copy
             except Exception as e:
                 print(f"[!] Error flattening timestamp: {e}")
                 return data
@@ -152,44 +163,65 @@ class Model:
         if data is None or data.empty:
             print("[!] No data to process")
             return None
-        print(f"[>] Preprocessing data for {data.index[0]}")
+        
+        symbol = data.index[0]
+        if "/" in symbol:
+            symbol = symbol.replace("/", "_")
+            
+        print(f"[>] Preprocessing data for {symbol}")
         print(f"[>] Data shape: {data.shape}, Columns: {data.columns}")
 
         try:
             data = _delta_timestamp(data)
-            print(f"{data}")
-            
-            data.to_csv('temp/data.csv')
-            if len(data) < 1:
-                print(f"[!] Insufficient rows: {len(data)}")
-                return None
-            scaled = self.scaler.fit_transform(data)
-            # NumPy arrays don't have to_csv method, using pandas to save it
-            pd.DataFrame(scaled).to_csv('temp/scaled.csv', index=False)
+
             seq_len = self.config['sequence_length']
 
-            if len(scaled) <= seq_len:
-                print(f"[!] Insufficient rows: {len(scaled)} for seq_len {seq_len}")
-                return None
+            if len(data) == seq_len+1:
+                # Check if we have a saved scaler for this symbol
+                if symbol in self.scalers:
+                    print(f"[>] Using saved scaler for {symbol}")
+                    scaled = self.scalers[symbol].transform(data)
+                else:
+                    # If no saved scaler, use the general one
+                    print(f"[>] No saved scaler found for {symbol}, using general scaler")
+                    scaled = self.scalers[symbol].transform(data)
+                
+                x_input = np.array(scaled[-seq_len:])
 
-            x_seq = []  
-            y_seq = []
-            for i in range(seq_len, len(scaled)):
-                x_seq.append(scaled[i - seq_len:i])
-                y_seq.append(scaled[i, :])
+                pd.DataFrame(scaled).to_csv(f'Scaled/Stream/scaled_{symbol}.csv', index=False)
+                return {"x_input": x_input}
+            
+            else:
+                x_seq = []
+                y_seq = []
 
-            x, y = np.array(x_seq), np.array(y_seq)
+                # For historical data, fit and save the scaler
+                self.scalers[symbol] = MinMaxScaler(feature_range=(0, 1))
+                scaled = self.scalers[symbol].fit_transform(data)
+                
+                # Save the scaler for future use
+                scaler_file = f"{self.folder}/scaler_{symbol}.pkl"
+                with open(scaler_file, 'wb') as f:
+                    pickle.dump(self.scalers[symbol], f)
+                print(f"[>] Saved scaler for {symbol} to {scaler_file}")
+                
+                for i in range(seq_len, len(scaled)):
+                    x_seq.append(scaled[i - seq_len:i])
+                    y_seq.append(scaled[i, :])
 
-            split = int(len(x) * self.config['train_split'])
-            if split == 0:
-                print("[!] Train split too small")
-                return None
+                x, y = np.array(x_seq), np.array(y_seq)
+                
+                split = int(len(x) * self.config['train_split'])
+                if split == 0:
+                    print("[!] Train split too small")
+                    return None
 
-            x_train, x_test = x[:split], x[split:]
-            y_train, y_test = y[:split], y[split:]
-
-            print(f"[o] Shapes - X_train: {x_train.shape}, Y_train: {y_train.shape}, X_test: {x_test.shape}, Y_test: {y_test.shape}")
-            return {"x_train": x_train, "y_train": y_train, "x_test": x_test, "y_test": y_test}
+                x_train, x_test = x[:split], x[split:]
+                y_train, y_test = y[:split], y[split:]
+                # NumPy arrays don't have to_csv method, using pandas to save it
+                pd.DataFrame(scaled).to_csv(f'Scaled/History/scaled_{symbol}.csv', index=False)
+                #print(f"[o] Shapes - X_train: {x_train.shape}, Y_train: {y_train.shape}, X_test: {x_test.shape}, Y_test: {y_test.shape}")
+                return {"x_train": x_train, "y_train": y_train, "x_test": x_test, "y_test": y_test}
 
         except Exception as e:
             print(f"[!] Preprocessing error: {e}")
@@ -197,11 +229,23 @@ class Model:
 
     def postprocess(self, data: pd.DataFrame) -> None:
         pass
+    
     async def create(self, data: pd.DataFrame, config: Dict[str, int]) -> None:
         symbol = data.index[0]
 
         if "/" in symbol:
             symbol = symbol.replace("/", "_")
+            
+        # Try to load a saved scaler if it exists
+        scaler_file = f"{self.folder}/scaler_{symbol}.pkl"
+        if os.path.exists(scaler_file):
+            try:
+                with open(scaler_file, 'rb') as f:
+                    self.scalers[symbol] = pickle.load(f)
+                print(f"[>] Loaded saved scaler for {symbol}")
+            except Exception as e:
+                print(f"[!] Error loading scaler: {e}")
+                
         # Always recreate the model for consistency
         self.model_dict[symbol] = LSTM(symbol, config)
         self.model_dict[symbol].folder = self.folder
@@ -220,32 +264,32 @@ class Model:
         self.model_dict[symbol].build()
         self.model_dict[symbol].train()
         self.model_dict[symbol].test()
-        self.model_dict[symbol].summary()
+        self.model_dict[symbol].model.summary()
     
     async def assess(self, symbol: str) -> None:
         if "/" in symbol:
             symbol = symbol.replace("/", "_")
 
         if symbol not in self.model_dict.keys():
-            print(f"Model {symbol} does not exist")
+            print(f"[!][Assess] Model {symbol} does not exist")
             return None
 
         self.model_dict[symbol].test()
 
     async def predict(self, data: pd.DataFrame) -> None:
-        symbol = data.index[0]
-
-        if "/" in symbol:
-            symbol = symbol.replace("/", "_")
+        symbol = data.index[0]  
+        symbol = symbol.replace('/', '_')  # Replace / with _
 
         if symbol not in self.model_dict.keys():
-            print(f"Model {symbol} does not exist")
+            print(f"[!][Predict] Model {symbol} does not exist")
             return None
-        data = self.preprocess(data)
-        if data is None:
+        data = data.iloc[-(self.config['sequence_length']+1):]
+        data_input = self.preprocess(data)
+
+        if data_input is None:
             print(f"[!] Failed to preprocess data for {symbol}")
             return None
-        self.model_dict[symbol].dataset['x_test'].append(data['x_test'])
-        self.model_dict[symbol].operate()
+ 
+        self.model_dict[symbol].operate(data_input)
 
         return None
