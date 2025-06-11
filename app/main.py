@@ -288,6 +288,7 @@ class Menu():
 
     class MenuOption(Enum):
         DISPLAY_STATUS = "0"
+        AUTO_START = "A"
         FILE_HISTORICAL = "1"
         LOAD_HISTORICAL = "2"
         RUN_STREAM = "3"
@@ -301,6 +302,7 @@ class Menu():
         self.app = app
         self.menu_actions: Dict[str, Tuple[str, Callable]] = {
             self.MenuOption.DISPLAY_STATUS.value: ("Display Status", self.app.display_status),
+            self.MenuOption.AUTO_START.value: ("Auto Start", self.auto_start),
             self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
             self.MenuOption.LOAD_HISTORICAL.value: ("Load Historical", self.app.load_historical),
             self.MenuOption.RUN_STREAM.value: ("Run Stream", self.app.run_stream),
@@ -310,6 +312,13 @@ class Menu():
             self.MenuOption.STOP_MODEL.value: ("Stop Model", self.app.stop_model),
             self.MenuOption.EXIT.value: ("Exit", self.app.exit_app)
         }
+
+    async def auto_start(self) -> None:
+        await self.app.file_historical()
+        await self.app.load_historical()
+        await self.app.run_model()
+        await self.app.verify_model()
+        await self.app.run_stream()
 
     async def select_action(self) -> str:
         return await asyncio.get_event_loop().run_in_executor(None, lambda: input("Enter your choice: ").strip())
