@@ -1,5 +1,5 @@
 # -------------- Date and Time Handling --------------
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
 from tzlocal import get_localzone
 

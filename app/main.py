@@ -1,9 +1,8 @@
 from head import *
 from module.client import Account, DataType, CurrencyType
-from module.record import Record
+from module.record import Record, Math
 from module.model import Model
 import os
-
 
 @dataclass
 class Parameters:
@@ -29,8 +28,8 @@ class Parameters:
     data_type: DataType = DataType.BARS
 
     def __post_init__(self):
-        self.crypto_symbols = ["BTC/USD", "ETH/USD"]
-        self.stock_symbols = ["NVDA", "AAPL"]
+        self.crypto_symbols = []
+        self.stock_symbols = ["LCID"]
     
     def update(self, **kwargs) -> None:
         """Update multiple fields at once"""
@@ -54,7 +53,7 @@ class Parameters:
     def time_config(self) -> Dict[str, Dict[str, int]]:
         return {
             "range": {"day": 5, "hour": 0, "minute": 0},
-            "step": {"day": 0, "hour": 0, "minute": 5}
+            "step": {"day": 0, "hour": 0, "minute": 5},
         }
     
     @property
@@ -63,6 +62,7 @@ class Parameters:
     # bar: timestamp, open, high, low, close, volume, trade_count, vwap
     # quote: timestamp, ask, bid, ask_size, bid_size
     # trade: timestamp, price, size, exchange
+    # chain: timestamp, underlying_symbol, expiration_date, strike_price, option_type, open_interest, volume, bid_size, bid_price, ask_size, ask_price, last_trade_price, last_trade_size, last_trade_time, last_trade_exchange
     @property
     def lstm_config(self) -> Dict[str, Dict[str, int]]:
         return {
@@ -88,6 +88,7 @@ class Application:
 
         self.record = Record(self.param.record_folder)
         self.record.set_columns(self.param.column_config)
+        self.math = Math()
 
         self.model = Model(self.param.model_folder)
 
@@ -171,8 +172,14 @@ class Application:
         
         print("="*40)
     
-    #def update_parameters(self, **kwargs) -> None:
-     
+    async def file_options(self) -> None:
+        result = await self.account.fetch_options(CurrencyType.STOCK)
+        await self.record.write(result) if result is not None else None
+
+    async def price_options(self) -> None:
+        chain = await self.record.read(self.param.all_symbols)
+        await self.math.calculate_fair_price(chain, self.param.all_symbols)
+
     async def file_historical(self) -> None:
         historical_tasks = [
             self.account.fetch_historical(CurrencyType.CRYPTO, self.param.data_type, self.param.time_config),
@@ -199,7 +206,29 @@ class Application:
                 self.crypto_data[symbol] = df
             elif symbol in self.param.stock_symbols:
                 self.stock_data[symbol] = df
-            #print(f"[o] Sampled {symbol}\n{df.iloc[0]}\n...\n{df.iloc[-1]}")
+                
+            # Display sample data in a clean format
+            print(f"\n{'='*80}")
+            print(f"Historical Data for {symbol}")
+            print('='*80)
+            
+            # Format numeric columns
+            pd.set_option('display.float_format', lambda x: '%.2f' % x)
+            
+            # Display first and last few rows
+            print("\nFirst 5 rows:")
+            print('-'*80)
+            print(df.head().to_string())
+            
+            print("\nLast 5 rows:")
+            print('-'*80)
+            print(df.tail().to_string())
+            
+            # Display basic statistics
+            print("\nBasic Statistics:")
+            print('-'*80)
+            print(df.describe().to_string())
+            print('='*80)
 
     async def update_tasks(self) -> None:
         while self.stream_running:
@@ -287,9 +316,10 @@ class Application:
 class Menu():
 
     class MenuOption(Enum):
-        DISPLAY_STATUS = "0"
+        DISPLAY_STATUS = "I"
         AUTO_START = "A"
-        FILE_HISTORICAL = "1"
+        ANALYZE_OPTIONS = "B"
+        FILE_HISTORICAL = "1"   
         LOAD_HISTORICAL = "2"
         RUN_STREAM = "3"
         STOP_STREAM = "4"
@@ -303,6 +333,7 @@ class Menu():
         self.menu_actions: Dict[str, Tuple[str, Callable]] = {
             self.MenuOption.DISPLAY_STATUS.value: ("Display Status", self.app.display_status),
             self.MenuOption.AUTO_START.value: ("Auto Start", self.auto_start),
+            self.MenuOption.ANALYZE_OPTIONS.value: ("Analyze Options", self.analyze_options),
             self.MenuOption.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
             self.MenuOption.LOAD_HISTORICAL.value: ("Load Historical", self.app.load_historical),
             self.MenuOption.RUN_STREAM.value: ("Run Stream", self.app.run_stream),
@@ -319,6 +350,10 @@ class Menu():
         await self.app.run_model()
         await self.app.verify_model()
         await self.app.run_stream()
+
+    async def analyze_options(self) -> None:
+        await self.app.file_options()
+        await self.app.price_options()
 
     async def select_action(self) -> str:
         return await asyncio.get_event_loop().run_in_executor(None, lambda: input("Enter your choice: ").strip())

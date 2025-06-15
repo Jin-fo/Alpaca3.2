@@ -2,12 +2,16 @@ from head import *
 # ------------- Data Retrieval -------------
 from alpaca.data.live.stock import StockDataStream
 from alpaca.data.live.crypto import CryptoDataStream
+from alpaca.data.live import OptionDataStream
+
 from alpaca.data.historical.stock import StockHistoricalDataClient
 from alpaca.data.historical.crypto import CryptoHistoricalDataClient
+from alpaca.data.historical import OptionHistoricalDataClient
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.requests import (
     StockBarsRequest, StockQuotesRequest, StockTradesRequest,
-    CryptoBarsRequest, CryptoQuoteRequest, CryptoTradesRequest
+    CryptoBarsRequest, CryptoQuoteRequest, CryptoTradesRequest,
+    OptionChainRequest
 )
 # -------------- Trading Execution ----------
 from alpaca.trading.client import TradingClient
@@ -25,6 +29,10 @@ from alpaca.trading.enums import (
 from alpaca.common.exceptions import APIError
 from alpaca.common.rest import RESTClient
 
+class MarketType(Enum):
+    OPTION = "option"
+    SPOT = "spot"
+
 class CurrencyType(Enum):
     CRYPTO = "crypto"
     STOCK = "stock"
@@ -33,6 +41,7 @@ class DataType(Enum):
     BARS = "bars"
     QUOTES = "quotes"
     TRADES = "trades"
+    CHAIN = "chain"
     
 class Client:
     def __init__(self, config: Dict[str, Union[str, bool]]):
@@ -46,11 +55,36 @@ class Client:
         self.active_stream: Dict[CurrencyType, asyncio.Task] = {}
         self.new_data: List[pd.DataFrame] = []
     
+    def _option_client(self, currency: CurrencyType) -> Optional[OptionHistoricalDataClient]:
+        try:
+            return OptionHistoricalDataClient(
+                api_key=self.config["API_KEY"],
+                secret_key=self.config["SECRET_KEY"]
+            )
+        except APIError as e:
+            print(f"[!] Error creating {currency.value} option client: {e}")
+            return None
+        
+    def _option_request(self, currency: CurrencyType, data_type: DataType) -> Optional[type]:
+        try:
+            request_type = {
+                CurrencyType.STOCK: {
+                    DataType.CHAIN: OptionChainRequest
+                },
+                CurrencyType.CRYPTO: {
+                    DataType.CHAIN: OptionChainRequest
+                }
+            }
+            return request_type[currency][data_type]
+        except APIError as e:
+            print(f"[!] Error creating {currency.value} {data_type.value} request: {e}")
+            return None
+
     def _historical_client(self, currency: CurrencyType) -> Optional[Union[CryptoHistoricalDataClient, StockHistoricalDataClient]]:
         try: 
-            clients = {
+            clients = { 
                 CurrencyType.CRYPTO: CryptoHistoricalDataClient,
-                CurrencyType.STOCK: StockHistoricalDataClient
+                CurrencyType.STOCK: StockHistoricalDataClient,
             }
             # Create client with timezone setting
             client = clients[currency](
@@ -81,11 +115,12 @@ class Client:
             print(f"[!] Error creating {currency.value} {data_type.value} request: {e}")
             return None
         
-    def _stream_client(self, currency: CurrencyType) -> Optional[Union[CryptoDataStream, StockDataStream]]:
+    def _stream_client(self, currency: CurrencyType) -> Optional[Union[CryptoDataStream, StockDataStream, OptionDataStream]]:
         try:
             clients = {
                 CurrencyType.CRYPTO: CryptoDataStream,
-                CurrencyType.STOCK: StockDataStream
+                CurrencyType.STOCK: StockDataStream,
+                CurrencyType.OPTION: OptionDataStream
             }
             return clients[currency](self.config["API_KEY"], self.config["SECRET_KEY"])
         except APIError as e:
@@ -138,9 +173,16 @@ class Client:
             elif data_type == DataType.TRADES:
                 content = _trades(data)
 
-            print(f"[o] {symbol} : {timestamp}, {content}")
+            # Create DataFrame for display
+            df = pd.DataFrame([content], index=[timestamp])
+            df.index.name = 'timestamp'
             
-            # Convert to DataFrame
+            # Format the display
+            pd.set_option('display.float_format', lambda x: '%.2f' % x)
+            print(f"\n[o] {symbol} Update at {timestamp}")
+            print(df.to_string())
+            
+            # Convert to DataFrame with MultiIndex for storage
             df = pd.DataFrame([content], index=pd.MultiIndex.from_tuples(
                 [(symbol, timestamp)], names=['symbol', 'timestamp']
             ))
@@ -200,6 +242,199 @@ class Account(Client):
         print(f"[+] Focused symbols: {self.focused}")
         return self.focused if any(self.focused.values()) else None
     
+    async def fetch_options(self, currency: CurrencyType) -> Optional[Dict[str, pd.DataFrame]]:
+        # Helper functions
+        def _clean_symbol(symbol: str) -> str:
+            return symbol.replace('/', '').upper()
+            
+        def _get_next_expiration(symbol: str) -> Optional[date]:
+            current_date = datetime.now(ZoneInfo(self.info["zone"])).date()
+            
+            for days in range(31):  # Check current date and next 30 days
+                check_date = current_date + timedelta(days=days)
+                request = OptionChainRequest(
+                    underlying_symbol=symbol,
+                    expiration_date=check_date,
+                    include_otc=False,
+                    limit=1
+                )
+                
+                try:
+                    response = client_type.get_option_chain(request)
+                    if (isinstance(response, dict) and response) or (hasattr(response, 'contracts') and response.contracts):
+                        return check_date
+                except Exception:
+                    continue
+            
+            print(f"[!] No valid expiration dates found for {symbol}")
+            return None
+            
+        def _option_chain_request(symbol: str, page_token: Optional[str] = None) -> Optional[OptionChainRequest]:
+            clean_symbol = _clean_symbol(symbol)
+            expiration_date = _get_next_expiration(clean_symbol)
+            if not expiration_date:
+                return None
+                
+            print(f"[+] Using expiration date {expiration_date} for {clean_symbol}")
+            
+            try:
+                return OptionChainRequest(
+                    underlying_symbol=clean_symbol,
+                    expiration_date=expiration_date,
+                    include_otc=False,
+                    page_token=page_token,
+                    limit=1000,
+                    include_volume=True,
+                    include_open_interest=True,
+                    include_underlying_price=True,
+                    include_implied_volatility=True
+                )
+            except APIError as e:
+                print(f"[!] Error creating option chain request: {str(e)}")
+                return None
+
+        def _process_option_chain(data: Dict) -> Dict[str, pd.DataFrame]:
+            if not data:
+                return {}
+            
+            # Convert dictionary of option contracts to DataFrame
+            contracts = []
+            for symbol, contract in data.items():
+                contract_dict = contract if isinstance(contract, dict) else contract.__dict__
+                underlying = ''.join(c for c in symbol if not c.isdigit())[:-1]
+                contract_dict['underlying_symbol'] = underlying
+                
+                # Split latest_trade into separate columns
+                if 'latest_trade' in contract_dict and contract_dict['latest_trade']:
+                    trade = contract_dict['latest_trade']
+                    contract_dict['trade_time'] = getattr(trade, 'timestamp', None)
+                    contract_dict['trade_price'] = getattr(trade, 'price', None)
+                    contract_dict['trade_size'] = getattr(trade, 'size', None)
+                else:
+                    contract_dict['trade_time'] = None
+                    contract_dict['trade_price'] = None
+                    contract_dict['trade_size'] = None
+                
+                # Split latest_quote into separate columns
+                if 'latest_quote' in contract_dict and contract_dict['latest_quote']:
+                    quote = contract_dict['latest_quote']
+                    contract_dict['quote_time'] = getattr(quote, 'timestamp', None)
+                    contract_dict['bid_price'] = getattr(quote, 'bid_price', None)
+                    contract_dict['bid_size'] = getattr(quote, 'bid_size', None)
+                    contract_dict['ask_price'] = getattr(quote, 'ask_price', None)
+                    contract_dict['ask_size'] = getattr(quote, 'ask_size', None)
+                else:
+                    contract_dict['quote_time'] = None
+                    contract_dict['bid_price'] = None
+                    contract_dict['bid_size'] = None
+                    contract_dict['ask_price'] = None
+                    contract_dict['ask_size'] = None
+                
+                # Remove the original columns
+                contract_dict.pop('latest_trade', None)
+                contract_dict.pop('latest_quote', None)
+                
+                contracts.append(contract_dict)
+            
+            df = pd.DataFrame(contracts)
+            if df.empty:
+                return {}
+                
+            # Extract expiration date and option details from symbol
+            def parse_option_symbol(symbol: str) -> tuple:
+                date_str = symbol[len(underlying):len(underlying)+6]
+                year = '20' + date_str[:2]
+                month = date_str[2:4]
+                day = date_str[4:6]
+                exp_date = f"{year}-{month}-{day}"
+                opt_type = symbol[len(underlying)+6]
+                strike = float(symbol[len(underlying)+7:]) / 1000
+                return exp_date, opt_type, strike
+            
+            # Add parsed columns and create multi-index
+            parsed_data = [parse_option_symbol(sym) for sym in df['symbol']]
+            df['expiration_date'] = [x[0] for x in parsed_data]
+            df['option_type'] = [x[1] for x in parsed_data]
+            df['strike_price'] = [x[2] for x in parsed_data]
+            
+            df.drop('symbol', axis=1, inplace=True)
+            df.set_index(['underlying_symbol', 'expiration_date', 'option_type', 'strike_price'], inplace=True)
+            df.sort_index(inplace=True)
+            
+            # Get next closest expiration for each symbol
+            grouped = df.groupby(['underlying_symbol', 'expiration_date'])
+            option_chains = {}
+            for (symbol, exp_date), group_df in grouped:
+                if symbol not in option_chains or exp_date < option_chains[symbol]['expiration_date']:
+                    option_chains[symbol] = {
+                        'expiration_date': exp_date,
+                        'data': group_df
+                    }
+            
+            return {symbol: data['data'] for symbol, data in option_chains.items()}
+
+        # Main function logic
+        
+        if not self.focused[currency]:
+            print("[!] No focused symbols for", currency.value)
+            return None
+            
+        if currency == CurrencyType.CRYPTO:
+            print("[!] Crypto options are not supported by Alpaca")
+            return None
+            
+        client_type = self._option_client(currency)
+        if not client_type:
+            print("[!] Failed to create option client")
+            return None
+
+        try:
+            all_chains = {}
+            for symbol in self.focused[currency]:
+                print(f"\n[+] Fetching option chain for {symbol}...")
+                all_contracts = {}
+                page_token = None
+                
+                while True:
+                    request = _option_chain_request(symbol, page_token)
+                    if not request:
+                        break
+                    
+                    try:
+                        response = await asyncio.wait_for(
+                            asyncio.to_thread(client_type.get_option_chain, request),
+                            timeout=60.0
+                        )
+                        
+                        if not response:
+                            break
+                        
+                        if isinstance(response, dict):
+                            all_contracts.update(response)
+                        
+                        if hasattr(response, 'next_page_token') and response.next_page_token:
+                            page_token = response.next_page_token
+                        else:
+                            break
+                            
+                    except (asyncio.TimeoutError, Exception) as e:
+                        print(f"[!] Error fetching option chain for {symbol}: {str(e)}")
+                        break
+                
+                if all_contracts:
+                    chains = _process_option_chain(all_contracts)
+                    all_chains.update(chains)
+                else:
+                    print(f"[!] No option contracts found for {symbol}")
+            
+            return all_chains
+            
+        except Exception as e:
+            print(f"[!] Error in fetch_options: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
     async def fetch_historical(self, currency: CurrencyType, data_type: DataType, interval: Dict) -> Optional[Dict[str, pd.DataFrame]]:
         if not self.focused[currency]:
             return None
