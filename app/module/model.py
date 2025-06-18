@@ -140,6 +140,9 @@ class Model:
         self.model_dict : dict[str, any] = {}
         self.scalers = {}  # Dictionary to store scalers for each symbol
 
+    def set_config(self, config: dict[str, int]) -> None:
+        self.config = config
+
     def preprocess(self, data: pd.DataFrame) -> dict[str, np.ndarray] | None:
     
         def _delta_timestamp(data: pd.DataFrame) -> pd.DataFrame:

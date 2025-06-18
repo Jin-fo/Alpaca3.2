@@ -3,39 +3,56 @@ from module.client import Account, DataType, CurrencyType
 from module.record import Record, Math
 from module.model import Model
 import os
+import json
 
-@dataclass
-class Parameters:
-    """Simple user configuration"""
-    
-    # API Configuration
-    api_key: str = "PKE1B8WAV2KJ324ZKQKC"
-    secret_key: str = "Ro7nFRclHQekQSf5Tt3zbpJAr9AaXhQ7r67sJJDy"
-    paper_trading: bool = True
+class Configuration:
+    """Configuration loaded from JSON file"""
 
-    # Account Settings
-    account_name: str = "Paper Account"
-    model_name: str = "LSTM"
-    # Record Directory/folder name
-    record_folder: str = "data"
-    model_folder: str = "models"
+    def __init__(self):
+        self.path = "app/config.json"
+        self.last_mtime = 0  # Store last known modified time
+        self.load()
 
-    # Trading Symbols
-    crypto_symbols: List[str] = None
-    stock_symbols: List[str] = None
-    
-    # Data Settings
-    data_type: DataType = DataType.BARS
+    def load(self) -> None:
+        try:
+            with open(self.path, 'r') as f:
+                self._config = json.load(f)
 
-    def __post_init__(self):
-        self.crypto_symbols = []
-        self.stock_symbols = ["LCID"]
-    
-    def update(self, **kwargs) -> None:
-        """Update multiple fields at once"""
-        for field, value in kwargs.items():
-            if hasattr(self, field):
-                setattr(self, field, value)
+            # API Configuration
+            self.api_key = self._config['api']['key']
+            self.secret_key = self._config['api']['secret']
+            self.paper_trading = self._config['api']['paper']
+
+            # Account Settings
+            self.account_name = self._config['account']['name']
+            self.model_name = self._config['account']['model']
+            self.record_folder = self._config['account']['folders']['data']
+            self.model_folder = self._config['account']['folders']['models']
+
+            # Trading Symbols
+            self.crypto_symbols = self._config['symbols']['crypto']
+            self.stock_symbols = self._config['symbols']['stock']
+
+            # Data Settings
+            self.data_type = DataType[self._config['data']['type']]
+
+            # Update last_mtime after successful load
+            self.last_mtime = os.path.getmtime(self.path)
+            print(f"[Info] Configuration loaded from {self.path}")
+        except Exception as e:
+            print(f"[!] Error loading config: {e}")
+
+    def update(self) -> None:
+        """Reload config if file was modified"""
+        print("[Debug] Checking for config updates...")  # Debug print
+        try:
+            current_mtime = os.path.getmtime(self.path)
+            if current_mtime > self.last_mtime:
+                print(f"[#] Config file modified")
+                self.load()
+
+        except Exception as e:
+            print(f"[!] Error updating config: {e}")
     
     @property
     def all_symbols(self) -> List[str]:
@@ -51,52 +68,50 @@ class Parameters:
     
     @property
     def time_config(self) -> Dict[str, Dict[str, int]]:
-        return {
-            "range": {"day": 5, "hour": 0, "minute": 0},
-            "step": {"day": 0, "hour": 0, "minute": 5},
-        }
+        return self._config['data']['time']
     
     @property
     def column_config(self) -> List[str]:
-        return ["timestamp", "open", "high", "low", "close", "volume", "trade_count"] 
-    # bar: timestamp, open, high, low, close, volume, trade_count, vwap
-    # quote: timestamp, ask, bid, ask_size, bid_size
-    # trade: timestamp, price, size, exchange
-    # chain: timestamp, underlying_symbol, expiration_date, strike_price, option_type, open_interest, volume, bid_size, bid_price, ask_size, ask_price, last_trade_price, last_trade_size, last_trade_time, last_trade_exchange
+        return self._config['data']['columns']
+    
     @property
-    def lstm_config(self) -> Dict[str, Dict[str, int]]:
-        return {
-            "model_type": "LSTM",
-            "predict_future": 1,
-            "sequence_length": 60,
-            "train_split": 0.8,
-            "batch_size": 16, #generalization of data, increase batch size relative to dataset size 1:10
-            "epochs": 1, #passes through the data, high epochs on large dataset may lead to overfitting
-            "learning_rate": 0.001,
-            "lstm_units": [50, 50],  # hidden(50, 50) layers of lstm type
-            "dense_units": [25, 25, 7],  # hidden(25, 25) + output layer(7) to predict all features
-            "loss": "mean_squared_error",
-            "optimizer": "adam"
-        }
+    def lstm_config(self) -> Dict[str, Any]:
+        config = self._config['model'].copy()
+        # Convert layers structure to match expected format
+        config['lstm_units'] = config['layers']['lstm']
+        config['dense_units'] = config['layers']['dense']
+        del config['layers']
+        return config
 
 class Application:
     def __init__(self):
-        self.param = Parameters()
+        self.config = Configuration()
 
-        self.account = Account(self.param.api_config, self.param.account_name)
-        self.account.focus(self.param.all_symbols)
+        self.account = Account(self.config.api_config, self.config.account_name)
+        self.record = Record(self.config.record_folder)
 
-        self.record = Record(self.param.record_folder)
-        self.record.set_columns(self.param.column_config)
         self.math = Math()
-
-        self.model = Model(self.param.model_folder)
+        self.model = Model(self.config.model_folder)
 
         self.stream_running = False
         self.model_running = False
 
         self.crypto_data: Dict[str, pd.DataFrame] = {}
         self.stock_data: Dict[str, pd.DataFrame] = {}
+        self.update_configuration()
+
+    def update_configuration(self) -> None:
+        """Update application configuration and reset components"""
+        self.config.update()
+        
+        # Clear existing data and reset components
+        self.crypto_data.clear()
+        self.stock_data.clear()
+        
+        # Update components with new configuration
+        self.account.focus(self.config.all_symbols)
+        self.record.set_columns(self.config.column_config)
+        self.model.set_config(self.config.lstm_config)
 
     async def display_status(self) -> None:
         print("\n" + "="*40)
@@ -115,7 +130,7 @@ class Application:
         print(f"Stock symbols: {stock_symbols if stock_symbols else 'None'}")
         
         # Data type
-        print(f"Data type: {self.param.data_type.value}")
+        print(f"Data type: {self.config.data_type.value}")
         
         # Detailed task analysis
         all_tasks = asyncio.all_tasks()
@@ -177,13 +192,13 @@ class Application:
         await self.record.write(result) if result is not None else None
 
     async def price_options(self) -> None:
-        chain = await self.record.read(self.param.all_symbols)
-        await self.math.calculate_fair_price(chain, self.param.all_symbols)
+        chain = await self.record.read(self.config.all_symbols)
+        await self.math.calculate_fair_price(chain, self.config.all_symbols)
 
     async def file_historical(self) -> None:
         historical_tasks = [
-            self.account.fetch_historical(CurrencyType.CRYPTO, self.param.data_type, self.param.time_config),
-            self.account.fetch_historical(CurrencyType.STOCK, self.param.data_type, self.param.time_config),
+            self.account.fetch_historical(CurrencyType.CRYPTO, self.config.data_type, self.config.time_config),
+            self.account.fetch_historical(CurrencyType.STOCK, self.config.data_type, self.config.time_config),
         ]
         
         crypto_data, stock_data = await asyncio.gather(*historical_tasks, return_exceptions=True)
@@ -195,16 +210,16 @@ class Application:
         await asyncio.gather(*write_tasks, return_exceptions=True)
 
     async def load_historical(self) -> None:
-        data = await self.record.read(self.param.all_symbols)
+        data = await self.record.read(self.config.all_symbols)
         if data is None:
             print("[!] No data found in file!")
             return
         
         # Separate data by symbol type
         for symbol, df in data.items():
-            if symbol in self.param.crypto_symbols:
+            if symbol in self.config.crypto_symbols:
                 self.crypto_data[symbol] = df
-            elif symbol in self.param.stock_symbols:
+            elif symbol in self.config.stock_symbols:
                 self.stock_data[symbol] = df
                 
             # Display sample data in a clean format
@@ -259,8 +274,8 @@ class Application:
         self.stream_running = True
         
         # Start the streams - these methods already create tasks internally
-        await self.account.start_stream(CurrencyType.CRYPTO, self.param.data_type)
-        await self.account.start_stream(CurrencyType.STOCK, self.param.data_type)
+        await self.account.start_stream(CurrencyType.CRYPTO, self.config.data_type)
+        await self.account.start_stream(CurrencyType.STOCK, self.config.data_type)
         
         # Create our append task separately
         self.append_task = asyncio.create_task(self.update_tasks())
@@ -279,10 +294,10 @@ class Application:
         self.model_running = True
         build_tasks = []
         for df in self.crypto_data.values():
-            build_tasks.append(self.model.create(df, self.param.lstm_config))
+            build_tasks.append(self.model.create(df, self.config.lstm_config))
 
         for df in self.stock_data.values():
-            build_tasks.append(self.model.create(df, self.param.lstm_config))
+            build_tasks.append(self.model.create(df, self.config.lstm_config))
 
         await asyncio.gather(*build_tasks, return_exceptions=True)
 
@@ -382,7 +397,10 @@ async def main():
     menu = Menu(app)
     
     while True:
+        app.update_configuration()
         menu.display_menu()
+        
+        # Ensure this line is executed
         try:
             choice = await menu.select_action()
             result = await menu.handle_action(choice)

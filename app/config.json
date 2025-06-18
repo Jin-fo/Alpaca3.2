@@ -1,0 +1,42 @@
+{
+    "api": {
+        "key": "PKE1B8WAV2KJ324ZKQKC",
+        "secret": "Ro7nFRclHQekQSf5Tt3zbpJAr9AaXhQ7r67sJJDy",
+        "paper": true
+    },
+    "account": {
+        "name": "Paper Account",
+        "model": "LSTM",
+        "folders": {
+            "data": "data",
+            "models": "models"
+        }
+    },
+    "symbols": {
+        "crypto": [],
+        "stock": ["AMSC", "LCID", "MU", "NVDA", "CHYM"]
+    },
+    "data": {
+        "type": "BARS",
+        "columns": ["timestamp", "open", "high", "low", "close", "volume", "trade_count"],
+        "time": {
+            "range": {"day": 5, "hour": 0, "minute": 0},
+            "step": {"day": 0, "hour": 0, "minute": 5}
+        }
+    },
+    "model": {
+        "type": "LSTM",
+        "predict_future": 1,
+        "sequence_length": 60,
+        "train_split": 0.8,
+        "batch_size": 16,
+        "epochs": 1,
+        "learning_rate": 0.001,
+        "layers": {
+            "lstm": [50, 50],
+            "dense": [25, 25, 7]
+        },
+        "loss": "mean_squared_error",
+        "optimizer": "adam"
+    }
+}

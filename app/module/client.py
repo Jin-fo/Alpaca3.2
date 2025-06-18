@@ -227,14 +227,20 @@ class Account(Client):
     
     def focus(self, symbols: Union[str, List[str]]) -> Optional[Dict]:
         if isinstance(symbols, str): symbols = [symbols]
+        
+        # Clear existing focused symbols
+        self.focused = {CurrencyType.CRYPTO: [], CurrencyType.STOCK: []}
+        
         for symbol in symbols:
             try:
                 clean_symbol = symbol.replace('/', '')
                 asset = self.trading_client.get_asset(symbol_or_asset_id=clean_symbol)
                 if asset.asset_class == AssetClass.CRYPTO:
-                    self.focused[CurrencyType.CRYPTO].append(asset.symbol)
+                    if asset.symbol not in self.focused[CurrencyType.CRYPTO]:
+                        self.focused[CurrencyType.CRYPTO].append(asset.symbol)
                 else:
-                    self.focused[CurrencyType.STOCK].append(asset.symbol)
+                    if asset.symbol not in self.focused[CurrencyType.STOCK]:
+                        self.focused[CurrencyType.STOCK].append(asset.symbol)
             except APIError as e:
                 print(f"[!] Error focusing on {symbol}: {e}")
                 continue
