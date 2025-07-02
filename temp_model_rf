@@ -1,0 +1,307 @@
+from head import *
+import os
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
+from keras._tf_keras.keras.models import Sequential, load_model
+from keras._tf_keras.keras.layers import Dense, LSTM as KerasLSTM, InputLayer
+from keras._tf_keras.keras.optimizers import Adam
+from keras._tf_keras.keras.callbacks import ModelCheckpoint
+from sklearn.preprocessing import MinMaxScaler
+
+
+def _get_clean_symbol(symbol: str) -> str:
+    """Clean symbol name for safe file naming"""
+    return symbol.replace("/", "_").replace(":", "_").replace(" ", "_").replace("-", "_")
+
+
+class LSTM:
+    def __init__(self, symbol: str, config: Dict[str, int], folder: str):
+        self.folder = folder
+        self.name = f"LSTM_{symbol}"
+        self.model = Sequential(name=f"{self.name}")
+        self.config = config
+        self.dataset = {}
+        self.built = False
+        
+    def build(self) -> None:
+        if 'x_train' not in self.dataset:
+            print(f"[!] No training data available")
+            return
+        
+        self.model = Sequential(name=self.name)
+        
+        # Add input layer
+        input_shape = self.dataset['x_train'].shape[1:]
+        self.model.add(InputLayer(shape=input_shape))
+
+        # Add LSTM layers
+        lstm_layers = self.config['layers']['lstm']
+        for i, units in enumerate(lstm_layers):
+            return_sequences = i < len(lstm_layers) - 1
+            self.model.add(KerasLSTM(units, return_sequences=return_sequences))
+
+        # Add dense layers
+        dense_layers = self.config['layers']['dense']
+        for units in dense_layers[:-1]:
+            self.model.add(Dense(units, activation='relu'))
+        self.model.add(Dense(dense_layers[-1]))
+        
+        self.model.compile(
+            optimizer=Adam(learning_rate=self.config['settings']['learning_rate']), 
+            loss=self.config['loss']
+        )
+        self.built = True
+        
+    def train(self) -> None:
+        if not self.built or 'x_train' not in self.dataset:
+            print("[!] Model not ready for training")
+            return
+        
+        try:
+            checkpoint = ModelCheckpoint(
+                filepath=f"{self.folder}/{self.name}.keras",
+                monitor='val_loss',
+                save_best_only=True,
+                mode='min'
+            )
+        
+            history = self.model.fit(
+                x=self.dataset['x_train'], 
+                y=self.dataset['y_train'], 
+                batch_size=self.config['settings']['batch_size'],
+                epochs=self.config['settings']['epochs'],
+                validation_split=0.1,
+                verbose=0,
+                callbacks=[checkpoint]
+            )
+            print(f"[o] Training loss: {history.history['loss'][-1]:.4f}")
+
+        except Exception as e:
+            print(f"[!] Training error: {e}")
+
+    def test(self) -> None:
+        if not self.built or 'x_test' not in self.dataset:
+            print("[!] Model not ready for testing")
+            return
+        
+        try:
+            loss = self.model.evaluate(self.dataset['x_test'], self.dataset['y_test'], verbose=0)
+            print(f"[o] Test loss: {loss:.4f}")
+            
+        except Exception as e:
+            print(f"[!] Testing error: {e}")
+        
+    def predict(self, data_input: dict) -> np.ndarray | None:
+        """Predict and return the forecast values"""
+        if not self.built:
+            print("[!] Model not built")
+            return None
+            
+        try:
+            x_input = data_input['x_input'].reshape(1, *data_input['x_input'].shape)
+            future = self.model.predict(x_input, verbose=0)
+            print(f"[o] Prediction: {future[0]}")
+            return future[0]
+            
+        except Exception as e:
+            print(f"[!] Prediction error: {e}")
+            return None
+
+    def encode_state(self, data_input: dict) -> np.ndarray | None:
+        """Encode input data to LSTM latent state for RL environment"""
+        if not self.built:
+            print("[!] Model not built")
+            return None
+        
+        try:
+            x_input = data_input['x_input'].reshape(1, *data_input['x_input'].shape)
+            latent = self.model.predict(x_input, verbose=0)
+            return latent[0]  # Return the latent vector (state encoding)
+        except Exception as e:
+            print(f"[!] Encoding error: {e}")
+            return None
+
+    def get_state_dim(self) -> int | None:
+        """Get the dimension of the state encoding (LSTM output size)"""
+        if not self.built:
+            return None
+        
+        try:
+            # Get the output shape of the last layer
+            output_shape = self.model.output_shape
+            if output_shape:
+                return output_shape[-1]  # Return the last dimension
+            return None
+        except Exception as e:
+            print(f"[!] Error getting state dimension: {e}")
+            return None
+
+
+class Model:
+    def __init__(self):
+        self.model_dict = {}
+        self.scalers = {}
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
+
+    def load(self, config: dict) -> None:
+        self.folder = config["folder"]["name"]
+        os.makedirs(self.folder, exist_ok=True)
+        self.config = config
+
+    def preprocess(self, data: pd.DataFrame, symbol: str = None) -> dict | None:
+        if data is None or data.empty:
+            return None
+        
+        if symbol is None:
+            symbol = "unknown"
+        else:
+            symbol = _get_clean_symbol(symbol)
+            
+        seq_len = self.config['settings']['sequence_length']
+        
+        if len(data) < seq_len + 1:
+            print(f"[!] Insufficient data: need {seq_len + 1}, got {len(data)}")
+            return None
+
+        try:
+            # Convert timestamp to delta minutes
+            data_copy = data.copy()
+            if 'timestamp' in data_copy.columns:
+                data_copy['timestamp'] = pd.to_datetime(data_copy['timestamp']).diff().dt.total_seconds() / 60
+                data_copy['timestamp'] = data_copy['timestamp'].fillna(0)
+                data_copy = data_copy.rename(columns={'timestamp': 'delta_minute'})
+
+            # Scale data
+            if symbol not in self.scalers:
+                self.scalers[symbol] = MinMaxScaler(feature_range=(0, 1))
+                scaled = self.scalers[symbol].fit_transform(data_copy)
+            else:
+                scaled = self.scalers[symbol].transform(data_copy)
+
+            # Handle different data lengths
+            if len(data) == seq_len + 1:
+                # For prediction
+                x_input = np.array(scaled[-seq_len:])
+                os.makedirs(f'{self.folder}/Scaled/Stream', exist_ok=True)
+                pd.DataFrame(scaled).to_csv(f'{self.folder}/Scaled/Stream/scaled_{symbol}.csv', index=False)
+                return {"x_input": x_input}
+            else:
+                # For training
+                x_seq, y_seq = [], []
+                for i in range(seq_len, len(scaled)):
+                    x_seq.append(scaled[i - seq_len:i])
+                    y_seq.append(scaled[i, :])
+
+                x, y = np.array(x_seq), np.array(y_seq)
+                split = int(len(x) * self.config['settings']['train_split'])
+                
+                if split == 0:
+                    return None
+
+                os.makedirs(f"{self.folder}/Scaled/History", exist_ok=True)
+                pd.DataFrame(scaled).to_csv(f"{self.folder}/Scaled/History/scaled_{symbol}.csv", index=False)
+                
+                return {
+                    "x_train": x[:split], "y_train": y[:split],
+                    "x_test": x[split:], "y_test": y[split:]
+                }
+
+        except Exception as e:
+            print(f"[!] Preprocessing error: {e}")
+            return None
+    
+    async def create(self, data: pd.DataFrame, config: Dict, symbol: str = None) -> None:
+        if symbol is None:
+            symbol = "unknown"
+        else:
+            symbol = _get_clean_symbol(symbol)
+        
+        self.model_dict[symbol] = LSTM(symbol, config, self.folder)
+        print(f"[>] Creating model: {symbol}")
+
+        dataset = self.preprocess(data, symbol)
+        if dataset is None:
+            print(f"[!] Failed to preprocess {symbol}")
+            return
+            
+        self.model_dict[symbol].dataset = dataset
+        self.model_dict[symbol].build()
+        self.model_dict[symbol].train()
+        self.model_dict[symbol].test()
+
+    async def assess(self, symbol: str) -> None:
+        symbol = _get_clean_symbol(symbol)
+        
+        if symbol not in self.model_dict:
+            print(f"[!] Model {symbol} not found")
+            return
+
+        self.model_dict[symbol].test()
+
+    async def predict(self, data: pd.DataFrame, symbol: str = None) -> np.ndarray | None:
+        """Predict using the model and return the forecast"""
+        if symbol is None:
+            symbol = "unknown"
+        else:
+            symbol = _get_clean_symbol(symbol)
+        
+        if symbol not in self.model_dict:
+            print(f"[!] Model {symbol} not found")
+            return None
+            
+        seq_len = self.config['settings']['sequence_length']
+        if len(data) < seq_len + 1:
+            print(f"[!] Insufficient data for prediction")
+            return None
+            
+        data_input = self.preprocess(data.iloc[-(seq_len+1):], symbol)
+        if data_input:
+            return self.model_dict[symbol].predict(data_input)
+        return None
+
+    def encode_state(self, data: pd.DataFrame, symbol: str = None) -> np.ndarray | None:
+        """Encode data to LSTM state for RL environment"""
+        if symbol is None:
+            symbol = "unknown"
+        else:
+            symbol = _get_clean_symbol(symbol)
+        
+        if symbol not in self.model_dict:
+            print(f"[!] Model {symbol} not found")
+            return None
+            
+        seq_len = self.config['settings']['sequence_length']
+        if len(data) < seq_len + 1:
+            print(f"[!] Insufficient data for state encoding")
+            return None
+            
+        data_input = self.preprocess(data.iloc[-(seq_len+1):], symbol)
+        if data_input:
+            return self.model_dict[symbol].encode_state(data_input)
+        return None
+
+    def get_state_dim(self, symbol: str = None) -> int | None:
+        """Get the state dimension for a specific symbol's model"""
+        if symbol is None:
+            symbol = "unknown"
+        else:
+            symbol = _get_clean_symbol(symbol)
+        
+        if symbol not in self.model_dict:
+            print(f"[!] Model {symbol} not found")
+            return None
+        
+        return self.model_dict[symbol].get_state_dim()
+
+    def get_model(self, symbol: str = None) -> LSTM | None:
+        """Get the LSTM model instance for a specific symbol"""
+        if symbol is None:
+            symbol = "unknown"
+        else:
+            symbol = _get_clean_symbol(symbol)
+        
+        if symbol not in self.model_dict:
+            print(f"[!] Model {symbol} not found")
+            return None
+        
+        return self.model_dict[symbol]

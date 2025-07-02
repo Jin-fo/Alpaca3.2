@@ -1,42 +1,88 @@
 {
-    "api": {
-        "key": "PKE1B8WAV2KJ324ZKQKC",
-        "secret": "Ro7nFRclHQekQSf5Tt3zbpJAr9AaXhQ7r67sJJDy",
-        "paper": true
-    },
     "account": {
+        "api": {
+            "key": "PKE1B8WAV2KJ324ZKQKC",
+            "secret": "Ro7nFRclHQekQSf5Tt3zbpJAr9AaXhQ7r67sJJDy",
+            "paper": true
+        },        
         "name": "Paper Account",
-        "model": "LSTM",
-        "folders": {
-            "data": "data",
-            "models": "models"
-        }
-    },
-    "symbols": {
-        "crypto": [],
-        "stock": ["AMSC", "LCID", "MU", "NVDA", "CHYM"]
-    },
-    "data": {
-        "type": "BARS",
-        "columns": ["timestamp", "open", "high", "low", "close", "volume", "trade_count"],
-        "time": {
-            "range": {"day": 5, "hour": 0, "minute": 0},
-            "step": {"day": 0, "hour": 0, "minute": 5}
-        }
-    },
-    "model": {
-        "type": "LSTM",
-        "predict_future": 1,
-        "sequence_length": 60,
-        "train_split": 0.8,
-        "batch_size": 16,
-        "epochs": 1,
-        "learning_rate": 0.001,
-        "layers": {
-            "lstm": [50, 50],
-            "dense": [25, 25, 7]
+        "location": "America/New_York",
+
+        "crypto": {
+            "symbol": "BTC/USD",
+            "historical": "BARS",
+            "stream": "BARS",
+            "time_value": {
+                "range": {"day": 7, "hour": 0, "minute": 0},
+                "step": {"day": 0, "hour": 0, "minute": 30}
+            }
         },
-        "loss": "mean_squared_error",
-        "optimizer": "adam"
+
+        "stock": {
+            "symbol": [],
+            "historical": "BARS",
+            "stream": "BARS",
+            "time_value": {
+                "range": {"day": 5, "hour": 0, "minute": 0},
+                "step": {"day": 0, "hour": 0, "minute": 5}
+            }
+        },
+
+        "option": {
+            "symbol": ["NVDA"],
+            "historical": "CHAIN",
+            "stream": "TRADES",
+            "time_value": {
+                "range": {"day": 5, "hour": 0, "minute": 0},
+                "step": {"day": 0, "hour": 0, "minute": 5},
+                "expire": {"day": 0}
+            }
+        }
+    },
+
+    "record": {
+        "market": {
+            "regular": {
+                "columns": ["symbol", "open", "high", "low", "close", "vwap"]
+            },
+            "option": {
+                "columns": ["symbol", "expiration_date", "option_type", "strike_price", "bid_price", "bid_size", "ask_price", "ask_size", "trade_price", "trade_size", "implied_volatility", "trade_time"]
+            }
+        },
+        "folder": {
+            "name": "data"
+        }
+    },
+
+    "model": {
+        "method_1": {
+            "name": "Long_Short_Term_Memory",
+            "adjustable": {
+                "future_step": 5,
+                "sample_size": 1
+            },
+            "settings": {
+                "lstm": [50, 50],
+                "dense": [25, 25],
+                "sequence_length": 60,
+                "train_split": 0.8,
+                "batch_size": 16,
+                "epochs": 1,
+                "learning_rate": 0.001
+            },
+            "loss": "mean_squared_error",
+            "optimizer": "adam",
+            "folder": {
+                "name": "models"
+            }
+        },
+        "method_2": {
+            "name": "Reforcement_Learning"
+        },
+        "method_3": {
+            "name": "Decision_Tree"
+        }
     }
 }
+
+
