@@ -1,11 +1,13 @@
 from head import *
+import time
+import random
 # ------------- Data Retrieval -------------
 from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
 from alpaca.data.live import NewsDataStream, StockDataStream, CryptoDataStream, OptionDataStream
 from alpaca.data.historical import NewsClient, StockHistoricalDataClient, CryptoHistoricalDataClient, OptionHistoricalDataClient
 from alpaca.data.requests import (
-    StockBarsRequest, StockQuotesRequest, StockTradesRequest, StockLatestBarRequest, StockSnapshotRequest,
-    CryptoBarsRequest, CryptoQuoteRequest, CryptoTradesRequest, CryptoLatestBarRequest, CryptoSnapshotRequest,
+    StockBarsRequest, StockQuotesRequest, StockTradesRequest, StockSnapshotRequest,
+    CryptoBarsRequest, CryptoQuoteRequest, CryptoTradesRequest, CryptoSnapshotRequest,
     OptionChainRequest, OptionBarsRequest, OptionTradesRequest, OptionSnapshotRequest, 
 )
 # -------------- Trading Execution ----------
@@ -89,8 +91,12 @@ class Historical(Client):
         super().__init__()
         self.folder : str = None
         
-        self.latest_tasks: Dict[str, asyncio.Task] = {}
-        self.latest_data: Dict[str, pd.DataFrame] = {}
+        self.running_periodic : bool = False
+        self.request_tasks: Dict[str, asyncio.Task] = {}
+
+        self.crypto_latest: Dict[str, pd.DataFrame] = {}
+        self.stock_latest: Dict[str, pd.DataFrame] = {}
+        self.option_latest: Dict[str, pd.DataFrame] = {}
 
     def _request(self, market: MarketType, data_type: DataType) -> Optional[type]:
         try:
@@ -117,16 +123,114 @@ class Historical(Client):
             print(f"[!] Error creating {market.value} {data_type.value} request: {e}")
             return None
 
-    def _request_latest(self, market: MarketType, data_type: DataType) -> Optional[type]:
+    def status(self) -> str:
+        """Display historical data status"""
         try:
-            request_type = {
-                MarketType.STOCK: StockLatestBarRequest,
-                MarketType.CRYPTO: CryptoLatestBarRequest,
-            }
-            return request_type[market][data_type]
-        except APIError as e:
-            print(f"[!] Error creating {market.value} {data_type.value} request: {e}")
+            status = "Running" if self.running_periodic else "Stopped"
+            task_count = len(self.request_tasks)
+            print(f"[o] Periodic Status: {status} ({task_count} tasks)")
+            
+            # Data summary
+            crypto_count = len(self.crypto_latest)
+            stock_count = len(self.stock_latest)
+            option_count = len(self.option_latest)
+            print(f"[o] Latest Data: Crypto={crypto_count}, Stock={stock_count}, Option={option_count}")
+            
+            # Show latest prices
+            for market_name, data_dict in [("Crypto", self.crypto_latest), ("Stock", self.stock_latest), ("Option", self.option_latest)]:
+                if data_dict:
+                    print(f"[o] Latest {market_name} Data:")
+                    for symbol, df in data_dict.items():
+                        if df is not None and not df.empty:
+                            try:
+                                latest = df.iloc[-1]
+                                close_price = latest.get('close', 'N/A')
+                                if isinstance(close_price, (int, float)):
+                                    print(f"    {symbol}: ${close_price:.2f}")
+                                else:
+                                    print(f"    {symbol}: {close_price}")
+                            except Exception as e:
+                                print(f"    {symbol}: Error - {e}")
+                        else:
+                            print(f"    {symbol}: No data")
+            
+        except Exception as e:
+            print(f"[!] Error getting historical status: {e}")
+            return "Error"
+        
+        return "Success"
+    
+    async def pop_new_data(self, market: MarketType) -> Dict[str, pd.DataFrame]:
+        """Get latest data and convert to DataFrame format"""
+        def _convert_to_dataframe(data, symbol: str) -> pd.DataFrame:
+            """Convert any data type to DataFrame"""
+            if data is None:
+                return pd.DataFrame()
+            
+            # If already a DataFrame, return as is
+            if isinstance(data, pd.DataFrame):
+                df = data.copy()
+                
+                # If timestamp is in the index, reset it to a column
+                if df.index.name == 'timestamp' or 'timestamp' in str(df.index.names):
+                    df = df.reset_index()
+                
+                # Ensure symbol column is present
+                if 'symbol' not in df.columns:
+                    df['symbol'] = symbol
+                    
+                # Reorder columns to match expected CSV format
+                expected_cols = ['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'trade_count', 'vwap']
+                available_cols = [col for col in expected_cols if col in df.columns]
+                other_cols = [col for col in df.columns if col not in expected_cols]
+                df = df[available_cols + other_cols]
+                
+                return df
+            
+            # If it's a dict, convert to DataFrame
+            if isinstance(data, dict):
+                df = pd.DataFrame([data])
+                if 'symbol' not in df.columns:
+                    df['symbol'] = symbol
+                return df
+            
+            # If it's a single object, convert to dict then DataFrame
+            if hasattr(data, '__dict__'):
+                data_dict = data.__dict__
+                clean_dict = {k: v for k, v in data_dict.items() if v is not None}
+                df = pd.DataFrame([clean_dict])
+                if 'symbol' not in df.columns:
+                    df['symbol'] = symbol
+                return df
+            
+            # Fallback: try to convert to DataFrame directly
+            try:
+                df = pd.DataFrame(data)
+                if not df.empty and 'symbol' not in df.columns:
+                    df['symbol'] = symbol
+                return df
+            except:
+                return pd.DataFrame()
+        
+        if market == MarketType.CRYPTO:
+            data = self.crypto_latest.copy()
+            self.crypto_latest.clear()
+        elif market == MarketType.STOCK:
+            data = self.stock_latest.copy()
+            self.stock_latest.clear()
+        elif market == MarketType.OPTION:
+            data = self.option_latest.copy()
+            self.option_latest.clear()
 
+        # Convert data to DataFrame format
+        converted_data = {}
+        for symbol, raw_data in data.items():
+            if raw_data is not None:
+                df = _convert_to_dataframe(raw_data, symbol)
+                if not df.empty:
+                    converted_data[symbol] = df
+
+        return converted_data
 
     def _start_date(self, time_value: Dict) -> datetime:
         range_config = time_value["range"]
@@ -135,7 +239,7 @@ class Historical(Client):
         elif range_config["hour"] > 0:
             return datetime.now(ZoneInfo(self.location)) - timedelta(hours=range_config["hour"])
         elif range_config["minute"] > 0:
-            return datetime.now(ZoneInfo(self.location)) - timedelta(minutes=range_config["minute"])
+            return datetime.now(ZoneInfo(self.location)) - timedelta(minutes=range_config["minute"]) 
         else:
             raise Exception(f"Invalid range time: {range_config}")
 
@@ -155,44 +259,73 @@ class Historical(Client):
         request_type = self._request(MarketType.STOCK, data_type)
 
         if not client_type or not request_type:
-            print(f"[!] Failed to create {MarketType.STOCK.value} historical client or request")
+            print(f"[!] Invalid {MarketType.STOCK.value} historical client or request")
             return None
         
-        print(f"[>] Fetching {MarketType.STOCK.value} {data_type.value}: {stock}")
+        historical_method = getattr(client_type, f"get_stock_{data_type.value.lower()}")
         
-        try:
-            request = None
-            historical_method = getattr(client_type, f"get_stock_{data_type.value.lower()}")
+        async def _request(time_frame: TimeFrame, start_date: Dict[str, datetime]):
             response_dict = {}
-
             for symbol in stock:
                 if data_type == DataType.BARS:
                     request = request_type(
                         symbol_or_symbols=symbol,
-                        timeframe=self._delta_time(time_value),
-                        start=self._start_date(time_value)
+                        timeframe=time_frame,
+                        start=start_date[symbol],
+                        end=datetime.now(ZoneInfo(self.location))
                     )
-
                 elif data_type == DataType.QUOTES:
                     request = request_type(
-                        symbol_or_symbols=symbol,
-                        start=self._start_date(time_value)
+                        symbol_or_symbols=symbol, 
+                        start=start_date[symbol]
                     )
-
                 elif data_type == DataType.TRADES:
                     request = request_type(
-                        symbol_or_symbols=symbol,
-                        start=self._start_date(time_value)
+                        symbol_or_symbols=symbol, 
+                        start=start_date[symbol]
                     )
 
-                if historical_method and request:
-                    response = await asyncio.to_thread(historical_method, request)
-                    if response:
+                response = await asyncio.to_thread(historical_method, request)
+                if response:
+                    if response.df.index.get_level_values("timestamp")[-1] != start_date[symbol]:
                         response_dict[symbol] = response.df
                     else:
-                        raise Exception(f"response: {response}")
+                        response_dict[symbol] = None
                 else:
-                    raise Exception(f"historical_method: {historical_method} | request: {request}")
+                    raise Exception(f"response: {response}")
+            return response_dict
+
+        async def _request_loop(time_frame: TimeFrame, last_date: Dict[str, datetime]):
+            while True:
+                response_dict = await _request(time_frame, last_date)
+                if response_dict:
+                    self.stock_latest = response_dict
+                    for symbol, df in response_dict.items():
+                        if df is not None and not df.empty:
+                            last_date[symbol] = pd.to_datetime(df.index.get_level_values("timestamp")[-1])
+                        elif df is None:
+                            print(f"[o] No new data for {symbol}, keeping last_date: {last_date[symbol]}")
+                await asyncio.sleep(60)
+
+        print(f"[>] Fetching {MarketType.STOCK.value} {data_type.value}: {stock}")
+                        
+        try:
+            time_frame = self._delta_time(time_value)    
+            start_date = {symbol: self._start_date(time_value) for symbol in stock}
+            
+            response_dict = await _request(time_frame, start_date)
+            
+            if response_dict:
+                last_date = {}
+                for symbol, df in response_dict.items():
+                    if df is not None and not df.empty:
+                        last_date[symbol] = pd.to_datetime(df.index.get_level_values("timestamp")[-1])
+                    else:
+                        last_date[symbol] = start_date[symbol]
+                
+                if MarketType.STOCK.value in self.request_tasks:
+                    self.request_tasks[MarketType.STOCK.value].cancel()
+                self.request_tasks[MarketType.STOCK.value] = asyncio.create_task(_request_loop(time_frame, last_date))
             
             return response_dict
 
@@ -208,47 +341,69 @@ class Historical(Client):
             print(f"[!] Invalid {MarketType.CRYPTO.value} historical client or request")
             return None
         
-        print(f"[>] Fetching {MarketType.CRYPTO.value} {data_type.value}: {crypto}")
-        
-        try:
-            request = None
-            historical_method = getattr(client_type, f"get_crypto_{data_type.value.lower()}")
-            response_dict = {}
+        historical_method = getattr(client_type, f"get_crypto_{data_type.value.lower()}")
 
+        async def _request(time_frame: TimeFrame, start_date: Dict[str, datetime]):
+            response_dict = {}
             for symbol in crypto:
                 if data_type == DataType.BARS:
                     request = request_type(
                         symbol_or_symbols=symbol,
-                        timeframe=self._delta_time(time_value),
-                        start=self._start_date(time_value)
+                        timeframe=time_frame,
+                        start=start_date[symbol],
+                        end=datetime.now(ZoneInfo(self.location))
                     )
-
                 elif data_type == DataType.QUOTES:
                     request = request_type(
-                        symbol_or_symbols=symbol,
-                        start=self._start_date(time_value)
+                        symbol_or_symbols=symbol, 
+                        start=start_date[symbol] 
                     )
-
                 elif data_type == DataType.TRADES:
                     request = request_type(
-                        symbol_or_symbols=symbol,
-                        start=self._start_date(time_value)
+                        symbol_or_symbols=symbol, 
+                        start=start_date[symbol] 
                     )
 
-                if historical_method and request:
-                    try:
-                        response = await asyncio.wait_for(
-                                asyncio.to_thread(historical_method, request),
-                            timeout=60.0
-                        )
-                        if response:
-                            response_dict[symbol] = response.df
-                        else:
-                            raise Exception(f"response: {response}")
-                    except (asyncio.TimeoutError, Exception) as e:
-                        print(f"[!] Error: {e}")
-                        return None 
+                response = await asyncio.to_thread(historical_method, request)
+                if response:
+                    if response.df.index.get_level_values("timestamp")[-1] != start_date[symbol]:
+                        response_dict[symbol] = response.df
+                    else:
+                        response_dict[symbol] = None
+                else:
+                    raise Exception(f"response: {response}")
+                
+            return response_dict
 
+        async def _request_loop(time_frame: TimeFrame, last_date: Dict[str, datetime]):
+            while True:
+                response_dict = await _request(time_frame, last_date)
+                if response_dict:
+                    self.crypto_latest = response_dict
+                    for symbol, df in response_dict.items():
+                        if df is not None and not df.empty:
+                            last_date[symbol] = pd.to_datetime(df.index.get_level_values("timestamp")[-1])
+                await asyncio.sleep(1)
+
+        print(f"[>] Fetching {MarketType.CRYPTO.value} {data_type.value}: {crypto}")
+                        
+        try:
+            time_frame = self._delta_time(time_value)
+            start_date = {symbol: self._start_date(time_value) for symbol in crypto}
+            
+            response_dict = await _request(time_frame, start_date)
+            
+            if response_dict:
+                last_date = {}
+                for symbol, df in response_dict.items():
+                    if df is not None and not df.empty:
+                        last_date[symbol] = pd.to_datetime(df.index.get_level_values("timestamp")[-1]) #also include the last timestamp data, dont want that
+                    else:
+                        last_date[symbol] = datetime.now(ZoneInfo(self.location))
+                if MarketType.CRYPTO.value in self.request_tasks:
+                    self.request_tasks[MarketType.CRYPTO.value].cancel()
+                self.request_tasks[MarketType.CRYPTO.value] = asyncio.create_task(_request_loop(time_frame, last_date))
+            
             return response_dict
 
         except Exception as e:
@@ -406,90 +561,14 @@ class Historical(Client):
         except Exception as e:
             print(f"[!] Error: {e}")
             return None
+    
 
-    async def stock_latest(self, stock: List[str], data_type: DataType, periodic: bool = False, time_value: Dict = None) -> Dict[str, pd.DataFrame]:
-        if periodic and time_value:
-            await self._latest_periodic(stock, MarketType.STOCK, data_type, time_value)
-            return self.latest_data
+    async def stop_all(self) -> None:
+        for task in self.request_tasks.values():
+            task.cancel()
+        self.request_tasks.clear()
         
-        client_type = self.historical_client[MarketType.STOCK]
-        request_type = self._request_latest(MarketType.STOCK, data_type)
-
-        if not client_type or not request_type:
-            print(f"[!] Invalid {MarketType.STOCK.value} historical client or request")
-            return None
-        
-        try:
-            response_dict = {}
-            historical_method = getattr(client_type, f"get_stock_{data_type.value.lower()}")
-
-            for symbol in stock:
-                request = request_type(symbol_or_symbols=symbol)
-                response = await asyncio.to_thread(historical_method, request)
-                if response:
-                    response_dict[symbol] = response.df
-
-            return response_dict
-
-        except Exception as e:
-            print(f"[!] Error: {e}")
-            return None
-        
-    async def crypto_latest(self, crypto: List[str], data_type: DataType, periodic: bool = False, time_value: Dict = None) -> Dict[str, pd.DataFrame]:
-        if periodic and time_value:
-            await self._latest_periodic(crypto, MarketType.CRYPTO, data_type, time_value)
-            return self.latest_data
-        
-        client_type = self.historical_client[MarketType.CRYPTO]
-        request_type = self._request_latest(MarketType.CRYPTO, data_type)
-
-        if not client_type or not request_type:
-            print(f"[!] Invalid {MarketType.CRYPTO.value} historical client or request")
-            return None
-
-        try:
-            response_dict = {}
-            historical_method = getattr(client_type, f"get_crypto_{data_type.value.lower()}")
-            
-            for symbol in crypto:
-                request = request_type(symbol_or_symbols=symbol)
-                response = await asyncio.to_thread(historical_method, request)
-                if response:
-                    response_dict[symbol] = response.df
-            
-            return response_dict
-        
-        except Exception as e:
-            print(f"[!] Error: {e}")
-            return None
-
-    async def _latest_periodic(self, symbols: List[str], market: MarketType, data_type: DataType, time_value: Dict) -> None:
-        step = time_value["step"]
-        interval = step["day"]*86400 + step["hour"]*3600 + step["minute"]*60 or 300
-        
-        async def _fetch():
-            while True:
-                try:
-                    if market == MarketType.STOCK:
-                        data = await self.stock_latest(symbols, data_type)
-                    elif market == MarketType.CRYPTO:
-                        data = await self.crypto_latest(symbols, data_type)
-                    
-                    if data:
-                        self.latest_data.update(data)
-                        print(f"[o] Updated latest {market.value} at {datetime.now().strftime('%H:%M:%S')}")
-                    
-                    await asyncio.sleep(interval)
-                except Exception as e:
-                    print(f"[!] Latest fetch error: {e}")
-                    await asyncio.sleep(interval)
-        
-        task_key = f"{market.value}_latest"
-        if task_key in self.latest_tasks:
-            self.latest_tasks[task_key].cancel()
-        
-        self.latest_tasks[task_key] = asyncio.create_task(_fetch())
-        print(f"[>] Started latest {market.value} every {interval}s")
+        print("[o] All historical tasks stopped")
 
 class Stream(Client):
     def __init__(self) -> None:
@@ -503,23 +582,32 @@ class Stream(Client):
         self.stock_data : Dict[str, Any] = {}
         self.option_data : Dict[str, Any] = {}
 
-    def _status(self) -> str:
-        """Get current stream status"""
-        if not self.active_stream and self.running_stream == False:
-            return "No active streams"
+    def status(self) -> str:
+        """Display stream status"""
+        try:
+            status = "Running" if self.running_stream else "Stopped"
+            stream_count = len(self.active_stream)
+            print(f"[o] Stream Status: {status} ({stream_count} streams)")
+            
+            # Data summary
+            crypto_count = len(self.crypto_data)
+            stock_count = len(self.stock_data)
+            option_count = len(self.option_data)
+            print(f"[o] Buffered Data: Crypto={crypto_count}, Stock={stock_count}, Option={option_count}")
+            
+            # Show active streams
+            if self.active_stream:
+                print("[o] Active Streams:")
+                for symbol, stream_info in self.active_stream.items():
+                    task = stream_info.get("task")
+                    task_status = "Running" if task and not task.done() else "Stopped"
+                    print(f"    {symbol}: {task_status}")
+            
+        except Exception as e:
+            print(f"[!] Error getting stream status: {e}")
+            return "Error"
         
-        active_streams = []
-        for symbol, stream_info in self.active_stream.items():
-            task = stream_info.get("task")
-            if task and not task.done():
-                active_streams.append(f"{symbol} stream")
-            elif task and task.done():
-                active_streams.append(f"{symbol} stream (completed)")
-        
-        if active_streams:
-            return ", ".join(active_streams)
-        else:
-            return "No active streams"
+        return "Success"
         
     async def pop_new_data(self, market) -> Dict[str, pd.DataFrame]:
         """Get new data and convert to standardized DataFrame format"""
@@ -869,50 +957,22 @@ class Account():
     async def start_stream(self, market: MarketType) -> None:
         
         if market == MarketType.CRYPTO and self.investment["crypto"]:
-            try:
-                data_type = DataType.from_string(self.config["crypto"]["stream"])
-                await self.stream.crypto_run(self.investment["crypto"], data_type)
-            except Exception as e:
-                print(f"[!] Error starting {MarketType.CRYPTO.value} stream: {e}")
-                return None
+            data_type = DataType.from_string(self.config["crypto"]["stream"])
+            await self.stream.crypto_run(self.investment["crypto"], data_type)
             
         elif market == MarketType.STOCK and self.investment["stock"]:
-            try:
-                data_type = DataType.from_string(self.config["stock"]["stream"])
-                await self.stream.stock_run(self.investment["stock"], data_type)
-            except Exception as e:
-                print(f"[!] Error starting {MarketType.STOCK.value} stream: {e}")
-                return None
-            
+            data_type = DataType.from_string(self.config["stock"]["stream"])
+            await self.stream.stock_run(self.investment["stock"], data_type)
+
         elif market == MarketType.OPTION and self.investment["option"]:
-            try:
-                data_type = DataType.from_string(self.config["option"]["stream"])
-                await self.stream.option_run(self.investment["option"], data_type)
-            except Exception as e:
-                print(f"[!] Error starting {MarketType.OPTION.value} stream: {e}")
-                return None
-        elif market == MarketType.OPTION:
-            print(f"[!] No {MarketType.OPTION.value} symbols configured for streaming")
-            return None
-    
-    async def start_retrieve(self, market: MarketType) -> None:
-        if market == MarketType.CRYPTO and self.investment["crypto"]:
-            data_type = DataType.from_string(self.config["crypto"]["historical"])
-            await self.historical.crypto_latest(self.investment["crypto"], data_type, True, self.config["crypto"]["time_value"])
-        elif market == MarketType.STOCK and self.investment["stock"]:
-            data_type = DataType.from_string(self.config["stock"]["historical"])
-            await self.historical.stock_latest(self.investment["stock"], data_type, True, self.config["stock"]["time_value"])
-        
-    async def stop_retrieve(self) -> None:
-        for task in self.historical.latest_tasks.values():
-            task.cancel()
-        self.historical.latest_tasks.clear()
+            data_type = DataType.from_string(self.config["option"]["stream"])
+            await self.stream.option_run(self.investment["option"], data_type)
 
     async def stop_stream(self) -> None:
         await self.stream.stop_all()
-
-    def get_latest(self, symbol: str = None):
-        return self.historical.latest_data.get(symbol) if symbol else self.historical.latest_data
+        
+    async def stop_historical(self) -> None:
+        await self.historical.stop_all()
 
     async def make_order(self, market: MarketType, order_type) -> None:
         pass
@@ -927,91 +987,73 @@ class Account():
         print(f"Account: {self.name}")
         print(f"Location: {self.location}")
         
-        # Stream status (if implemented)
+        # Stream status
         try:
-            status = self.stream._status() if hasattr(self.stream, '_status') else "Not implemented"
-            print(f"Streams: {status}")
+            stream_status = self.stream.status()
+            print(f"Streams: {stream_status}")
         except Exception as e:
             print(f"Streams: Error getting status - {e}")
         
         # Periodic latest status
         try:
-            latest_status = "Running" if self.historical.latest_tasks else "Stopped"
-            latest_count = len(self.historical.latest_tasks)
-            data_count = len(self.historical.latest_data)
-            print(f"Periodic Latest: {latest_status} ({latest_count} tasks, {data_count} symbols with data)")
+            print("Periodic Latest:")
+            self.historical.status()
         except Exception as e:
             print(f"Periodic Latest: Error getting status - {e}")
         
-        # Focused symbols by market type
-        print(f"Crypto symbols: {self.investment.get('crypto', []) if self.investment.get('crypto') else 'None'}")
-        print(f"Stock symbols: {self.investment.get('stock', []) if self.investment.get('stock') else 'None'}")
-        print(f"Option symbols: {self.investment.get('option', []) if self.investment.get('option') else 'None'}")
+        # Investment symbols
+        print(f"\nInvestment Symbols:")
+        print(f"  Crypto: {', '.join(self.investment.get('crypto', [])) if self.investment.get('crypto') else 'None'}")
+        print(f"  Stock: {', '.join(self.investment.get('stock', [])) if self.investment.get('stock') else 'None'}")
+        print(f"  Option: {', '.join(self.investment.get('option', [])) if self.investment.get('option') else 'None'}")
         
-        # Configuration data types
+        # Configuration summary
         try:
-            crypto_data_type = self.config.get("crypto", {}).get("historical", "Not configured")
-            stock_data_type = self.config.get("stock", {}).get("historical", "Not configured")
-            option_data_type = self.config.get("option", {}).get("historical", "Not configured")
-            
-            print(f"Crypto data type: {crypto_data_type}")
-            print(f"Stock data type: {stock_data_type}")
-            print(f"Option data type: {option_data_type}")
+            print(f"\nData Types:")
+            print(f"  Crypto: {self.config.get('crypto', {}).get('historical', 'Not configured')}")
+            print(f"  Stock: {self.config.get('stock', {}).get('historical', 'Not configured')}")
+            print(f"  Option: {self.config.get('option', {}).get('historical', 'Not configured')}")
         except Exception as e:
             print(f"Data types: Error getting config - {e}")
         
-        # Detailed task analysis
+        #thread status
+        print("\nASYNC TASKS STATUS")
+        print("-" * 30)
+        
         all_tasks = asyncio.all_tasks()
-        print(f"\nASYNCIO TASKS ({len(all_tasks)} total):")
-        print("-" * 40)
+        running_tasks = [task for task in all_tasks if not task.done()]
         
-        task_categories = {
-            'stream': [],
-            'main': [],
-            'input': [],
-            'system': [],
-            'unknown': []
-        }
+        print(f"Running: {len(running_tasks)} | Total: {len(all_tasks)}")
         
-        for i, task in enumerate(all_tasks, 1):
-            try:
-                # Get task name and coroutine info
-                task_name = getattr(task, '_name', f'Task-{i}')
-                coro = task.get_coro()
-                coro_name = getattr(coro, '__name__', str(coro))
-                
-                # Get more details about the coroutine
-                if hasattr(coro, 'cr_code'):
-                    func_name = coro.cr_code.co_name
-                    filename = coro.cr_code.co_filename.split('/')[-1]
-                    line_no = coro.cr_frame.f_lineno if coro.cr_frame else '?'
-                    location = f"{filename}:{line_no}"
-                else:
-                    func_name = coro_name
-                    location = "unknown"
-                
-                # Categorize tasks
-                if 'run_stream' in func_name or 'stream' in func_name.lower():
-                    task_categories['stream'].append(f"  {task_name}: {func_name} ({location})")
-                elif 'main' in func_name or 'handle_action' in func_name:
-                    task_categories['main'].append(f"  {task_name}: {func_name} ({location})")
-                elif 'input' in func_name.lower() or 'executor' in str(task):
-                    task_categories['input'].append(f"  {task_name}: {func_name} ({location})")
-                elif any(x in func_name.lower() for x in ['loop', 'event', 'selector']):
-                    task_categories['system'].append(f"  {task_name}: {func_name} ({location})")
-                else:
-                    task_categories['unknown'].append(f"  {task_name}: {func_name} ({location})")
+        if running_tasks:
+            print("\nActive Tasks:")
+            for task in running_tasks:
+                try:
+                    coro = task.get_coro()
+                    func_name = getattr(coro, '__name__', 'unknown')
                     
-            except Exception as e:
-                task_categories['unknown'].append(f"  Task-{i}: <error getting info: {e}>")
+                    if hasattr(coro, 'cr_code'):
+                        func_name = coro.cr_code.co_name
+                    
+                    # Categorize and simplify
+                    if 'periodic' in func_name or '_periodic_loop' in func_name:
+                        task_type = "Periodic"
+                    elif 'stream' in func_name or 'run_forever' in func_name:
+                        task_type = "Stream"
+                    elif 'data_pipeline' in func_name:
+                        task_type = "Pipeline"
+                    elif 'main' in func_name or 'handle' in func_name:
+                        task_type = "Main"
+                    else:
+                        task_type = "System"
+                    
+                    print(f"  {task_type}: {func_name}")
+                    
+                except Exception:
+                    print(f"  Unknown: <task>")
         
-        # Display categorized tasks
-        for category, tasks in task_categories.items():
-            if tasks:
-                print(f"{category.upper()} ({len(tasks)}):")
-                for task_info in tasks:
-                    print(task_info)
-                print()
+        print()
+        
         
         print("="*40)
         

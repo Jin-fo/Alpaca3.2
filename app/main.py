@@ -63,12 +63,12 @@ class Application:
 
         self.is_browsing : bool = False
         self.is_streaming : bool = False
-        self.is_retrieving : bool = True
+        self.is_retrieving : bool = False
         self.is_analyzing : bool = False #ploting, 
         self.is_predicting : bool = False
         self.is_deciding : bool = False #order, buy, sell
 
-        asyncio.create_task(self._data_pipeline_loop())
+        asyncio.create_task(self._data_pipeline_loop(), name="DataPipelineLoop")
         
     def update_configuration(self):
         if self.config.update():
@@ -79,12 +79,38 @@ class Application:
         return False
     
     async def _data_pipeline_loop(self):
-
-        predicted : bool = False
+        predicted = False
+        timestamp = lambda: datetime.now(ZoneInfo(self.account.location)).strftime('%H:%M:%S')
 
         while True:
             if self.is_browsing:
                 pass
+
+            if self.is_retrieving:
+                crypto_data, stock_data, option_data = await asyncio.gather(
+                    self.account.historical.pop_new_data(MarketType.CRYPTO),
+                    self.account.historical.pop_new_data(MarketType.STOCK),
+                    self.account.historical.pop_new_data(MarketType.OPTION)
+                )
+                
+                append_tasks = []
+                
+                if crypto_data:
+                    print(f"[Historical - {datetime.now(ZoneInfo(self.account.location)).strftime('%H:%M:%S')}] Crypto : \n{crypto_data}")
+                    append_tasks.append(self.record.append(MarketType.CRYPTO.value, crypto_data))
+
+                if stock_data:
+                    print(f"[Historical - {datetime.now(ZoneInfo(self.account.location)).strftime('%H:%M:%S')}] Stock : \n{stock_data}")
+                    append_tasks.append(self.record.append(MarketType.STOCK.value, stock_data))
+
+                if option_data:
+                    print(f"[Historical - {datetime.now(ZoneInfo(self.account.location)).strftime('%H:%M:%S')}] Option : \n{option_data}")
+                    append_tasks.append(self.record.append(MarketType.OPTION.value, option_data))
+
+                if append_tasks:
+                    await asyncio.gather(*append_tasks, return_exceptions=True)
+                    predicted = False
+
             if self.is_streaming:
                 crypto_data, stock_data, option_data = await asyncio.gather(
                     self.account.stream.pop_new_data(MarketType.CRYPTO),
@@ -92,25 +118,14 @@ class Application:
                     self.account.stream.pop_new_data(MarketType.OPTION)
                 )
 
-                append_tasks = []
                 if crypto_data:
-                    print(f"[o] Crypto data: {crypto_data}")
-                    append_tasks.append(self.record.append(MarketType.CRYPTO.value, crypto_data))
-                    predicted = False
+                    print(f"[Stream] Crypto : \n{crypto_data}")
 
                 if stock_data:
-                    print(f"[o] Stock data: {stock_data}")
-                    append_tasks.append(self.record.append(MarketType.STOCK.value, stock_data))
+                    print(f"[Stream] Stock : \n{stock_data}")
 
                 if option_data:
-                    print(f"[o] Option data: {option_data}")
-                    append_tasks.append(self.record.append(MarketType.OPTION.value, option_data))
-
-                await asyncio.gather(*append_tasks, return_exceptions=True)
-
-                
-            if self.is_retrieving:
-                pass
+                    print(f"[Stream] Option : \n{option_data}")
 
             if self.is_analyzing:
                 pass
@@ -132,19 +147,66 @@ class Application:
 
                 predicted = True         
             
-            await asyncio.sleep(0.1)  # Prevent infinite loop from blocking
+            await asyncio.sleep(0.1)
 
     async def display_status(self):
-        """Display comprehensive application status"""
-        await self.account.display_status()
-    
-    async def file_historical(self):
-        print("\n[+] Fetching historical data...")
+        """Display application status"""
+        print("\n" + "="*40)
+        print("APPLICATION STATUS")
+        print("="*40)
         
-        # Create historical tasks for each market type
+        print(f"Account: {self.account.name}")
+        print(f"Location: {self.account.location}")
+        
+        # Background process status
+        print(f"\nBackground Processes:")
+        print(f"  Historical Data Collection: {'Active' if self.is_retrieving else 'Inactive'}")
+        print(f"  Model Prediction: {'Active' if self.is_predicting else 'Inactive'}")
+        print(f"  Streaming: {'Active' if self.is_streaming else 'Inactive'}")
+        print(f"  Order Processing: {'Active' if self.is_deciding else 'Inactive'}")
+        
+        # Component status
+        try:
+            self.account.stream.status()
+            print("Periodic Latest:")
+            self.account.historical.status()
+        except Exception as e:
+            print(f"Status Error: {e}")
+        
+        # Investment symbols
+        print(f"\nInvestment Symbols:")
+        for market_type, symbols in self.account.investment.items():
+            symbol_list = ', '.join(symbols) if symbols else 'None'
+            print(f"  {market_type.title()}: {symbol_list}")
+        
+        # Task status
+        all_tasks = asyncio.all_tasks()
+        running_tasks = [task for task in all_tasks if not task.done()]
+        print(f"\nTasks: Running={len(running_tasks)}, Total={len(all_tasks)}")
+        
+        if running_tasks:
+            print("  Running Tasks:")
+            for i, task in enumerate(running_tasks, 1):
+                # Try to get the task name
+                task_name = None
+                if hasattr(task, 'get_name'):
+                    task_name = task.get_name()
+                
+                # If no name or default name, try to extract from coroutine
+                if not task_name or task_name.startswith("Task-"):
+                    if hasattr(task, '_coro'):
+                        coro_name = task._coro.__name__ if hasattr(task._coro, '__name__') else "Unknown"
+                        task_name = f"{coro_name}-{i}"
+                    else:
+                        task_name = f"Background-{i}"
+                
+                print(f"    {i}. {task_name}")
+        
+        print("="*40)
+
+    async def run_historical(self):
         historical_tasks = {}
         
-        # Stock historical data
         if self.account.investment.get("stock"):
             historical_tasks[MarketType.STOCK] = self.account.fetch_historical(MarketType.STOCK)
         
@@ -171,7 +233,6 @@ class Application:
                 # Handle dictionary results (stock/crypto/option data)
                 if isinstance(result, dict) and result:
                     write_tasks.append(self.record.write(market_type.value, result))
-                    print(f"[+] Added {len(result)} symbols for {market_type.value}")
                 else:
                     print(f"[!] Invalid result format for {market_type.value}: {type(result)}")
                     
@@ -180,9 +241,15 @@ class Application:
         
         if write_tasks:
             await asyncio.gather(*write_tasks, return_exceptions=True)
-            print("[+] Historical data fetch and write completed")
         else:
             print("[!] No valid data to write!")
+
+        self.is_retrieving = True
+
+    async def stop_historical(self):
+        print("\n[+] Stopping historical data...")
+        await self.account.stop_historical()
+        self.is_retrieving = False
 
     async def run_stream(self):
         print("\n[+] Starting streams...")
@@ -194,26 +261,17 @@ class Application:
             print("[+] Crypto stream started")
 
             self.is_streaming = self.account.stream.running_stream
-            print("[+] Streams started successfully")
             return True
         except Exception as e:
             print(f"[!] Error starting streams: {e}")
             return False
 
-    async def auto_retrieve(self):
-        print("\n[+] Auto retrieving...")
-        pass
-
-    async def stop_retrieve(self):
-        print("\n[+] Stopping auto retrieving...")
-        pass
     async def stop_stream(self):
         print("\n[+] Stopping all streams...")
         try:
             await self.account.stop_stream()
 
             self.is_streaming = self.account.stream.running_stream
-            print("[+] All streams stopped successfully")
             return True
         except Exception as e:
             print(f"[!] Error stopping streams: {e}")
@@ -256,37 +314,12 @@ class Application:
             return False
         
         self.is_predicting = True
-        print("[+] Models created successfully")
         return True
 
     async def stop_models(self):
         print("\n[+] Stopping models...")
         self.is_predicting = False
         return True
-
-    # async def verify_models(self):
-    #     print("\n[+] Verifying models...")
-    #     test_tasks = []
-        
-    #     # Only assess crypto models if there is crypto data
-    #     if self.crypto_data:
-    #         for symbol in self.crypto_data.keys():
-    #             test_tasks.append(self.model.assess(symbol))
-
-    #     # Only assess stock models if there is stock data
-    #     if self.stock_data:
-    #         for symbol in self.stock_data.keys():
-    #             test_tasks.append(self.model.assess(symbol))
-
-    #     # If no data is available, show a message
-    #     if not test_tasks:
-    #         print("[!] No data available for model verification!")
-    #         print(f"Crypto data: {len(self.crypto_data)} symbols")
-    #         print(f"Stock data: {len(self.stock_data)} symbols")
-    #         return False
-
-    #     await asyncio.gather(*test_tasks, return_exceptions=True)
-    #     return True
 
     async def run_order(self):
         print("\n[+] Running order...")
@@ -309,7 +342,7 @@ class Application:
             await self.stop_stream()
         
         # Stop models if running
-        if self.is_model_running:
+        if self.is_predicting:
             await self.stop_models()
         
         # Final cleanup
@@ -319,30 +352,63 @@ class Application:
 class Menu:
     class Option(Enum):
         DISPLAY_STATUS = "I"
-        FILE_HISTORICAL = "1"
+        RUN_SWITCH = "1"
         STREAM_SWITCH = "2"
-        MODELS_SWITCH = "3"
-        ORDER_SWITCH = "4"
-        DISPLAY_MODELS = "5"
+        ORDER_SWITCH = "3"
+        DISPLAY_MODELS = "4"
         
         EXIT = "x"
 
     def __init__(self, app: Application):
         self.app = app
-        self.toggle_historical = False
+        self.toggle_run = False
         self.toggle_stream = False
-        self.toggle_models = False
         self.toggle_order = False
 
         self.menu_actions: Dict[str, tuple] = {
             self.Option.DISPLAY_STATUS.value: ("Display Status", self.app.display_status),
-            self.Option.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
+            self.Option.RUN_SWITCH.value: ("Run Switch (Historical + Models)", (self.run_historical_and_models, self.stop_historical_and_models)[self.toggle_run]),
             self.Option.STREAM_SWITCH.value: ("Stream Switch", (self.app.run_stream, self.app.stop_stream)[self.toggle_stream]),
-            self.Option.MODELS_SWITCH.value: ("Models Switch", (self.app.run_models, self.app.stop_models)[self.toggle_models]),
             self.Option.ORDER_SWITCH.value: ("Order Switch", (self.app.run_order, self.app.stop_order)[self.toggle_order]),
             self.Option.DISPLAY_MODELS.value: ("Display Models", self.app.display_models),
             self.Option.EXIT.value: ("Exit", self.app.exit_app)
         }
+    async def run_historical_and_models(self):
+        """Run both historical data collection and model training/prediction"""
+        print("\n[+] Starting historical data collection and model training...")
+        
+        # First run historical data collection
+        await self.app.run_historical()
+        
+        # Wait a moment for data to be processed
+        await asyncio.sleep(1)
+        
+        # Then run models
+        success = await self.app.run_models()
+        
+        if success:
+            print("[+] Historical data collection and model training completed successfully!")
+            print("[+] Continuous background processes are now running:")
+            print("    - Historical data collection: Active")
+            print("    - Model prediction: Active")
+            print("    - Use 'I' to check status or 'R' again to stop")
+            return True
+        else:
+            print("[!] Historical data collection completed, but model training failed!")
+            return False
+
+    async def stop_historical_and_models(self):
+        """Stop both historical data collection and model prediction"""
+        print("\n[+] Stopping historical data collection and model prediction...")
+        
+        # Stop historical data collection
+        await self.app.stop_historical()
+        
+        # Stop models
+        await self.app.stop_models()
+        
+        print("[+] Historical data collection and model prediction stopped!")
+        return True
 
     async def select_action(self) -> str:
         return await asyncio.get_event_loop().run_in_executor(None, lambda: input("Enter your choice: ").strip())
@@ -352,6 +418,7 @@ class Menu:
     
     async def handle_action(self, choice: str) -> Optional[str]:
         if choice in self.menu_actions:
+            # Get the action based on CURRENT toggle state
             _, action = self.menu_actions[choice]
             
             # Execute the action
@@ -360,13 +427,14 @@ class Menu:
             else:
                 result = action()
             
-            # Update toggle states based on the action executed
-            if choice == self.Option.STREAM_SWITCH.value:
+            # Update toggle states AFTER executing action
+            if choice == self.Option.RUN_SWITCH.value:
+                self.toggle_run = not self.toggle_run
+                self.app.is_retrieving = self.toggle_run
+                self.app.is_predicting = self.toggle_run
+            elif choice == self.Option.STREAM_SWITCH.value:
                 self.toggle_stream = not self.toggle_stream
                 self.app.is_streaming = self.toggle_stream
-            elif choice == self.Option.MODELS_SWITCH.value:
-                self.toggle_models = not self.toggle_models
-                self.app.is_model_running = self.toggle_models
             elif choice == self.Option.ORDER_SWITCH.value:
                 self.toggle_order = not self.toggle_order
                 self.app.is_deciding = self.toggle_order
@@ -374,9 +442,8 @@ class Menu:
             # Update menu actions with new toggle states
             self.menu_actions = {
                 self.Option.DISPLAY_STATUS.value: ("Display Status", self.app.display_status),
-                self.Option.FILE_HISTORICAL.value: ("File Historical", self.app.file_historical),
+                self.Option.RUN_SWITCH.value: ("Run Switch (Historical + Models)", (self.run_historical_and_models, self.stop_historical_and_models)[self.toggle_run]),
                 self.Option.STREAM_SWITCH.value: ("Stream Switch", (self.app.run_stream, self.app.stop_stream)[self.toggle_stream]),
-                self.Option.MODELS_SWITCH.value: ("Models Switch", (self.app.run_models, self.app.stop_models)[self.toggle_models]),
                 self.Option.ORDER_SWITCH.value: ("Order Switch", (self.app.run_order, self.app.stop_order)[self.toggle_order]),
                 self.Option.DISPLAY_MODELS.value: ("Display Models", self.app.display_models),
                 self.Option.EXIT.value: ("Exit", self.app.exit_app)

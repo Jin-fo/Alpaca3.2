@@ -154,8 +154,16 @@ from py_vollib.black_scholes import black_scholes as bs
 
 class Record:
     def __init__(self):
-        pass
-
+        self.folder: str = "Record_Folder"
+        self.regular_columns: List[str] = []
+        self.option_columns: List[str] = []
+    
+    def load(self, config: Dict[str, Any]) -> None:
+        self.folder = config["folder"]["name"]
+        self.regular_columns = config["market"]["regular"]["columns"]
+        self.option_columns = config["market"]["option"]["columns"]
+        os.makedirs(self.folder, exist_ok=True)
+    
     def _fill_gaps_helper(self, df: pd.DataFrame) -> pd.DataFrame:
         # Check for either 'timestamp' or 'index' column
         time_col = 'timestamp' if 'timestamp' in df.columns else 'index' if 'index' in df.columns else None
@@ -171,6 +179,8 @@ class Record:
             df_indexed = df.set_index(time_col).sort_index()
             
             time_diffs = df[time_col].diff().dropna()
+            freq = "1h"  # Default frequency
+            
             if not time_diffs.empty:
                 # Get all time differences in seconds
                 diff_seconds = time_diffs.dt.total_seconds()
@@ -180,10 +190,7 @@ class Record:
                     s = most_common_diff.iloc[0]
                     freq_map = {60: "1min", 300: "5min", 900: "15min", 1800: "30min", 3600: "1h", 86400: "1D"}
                     freq = freq_map.get(s, f"{int(s/60)}min" if s < 3600 else f"{int(s/3600)}h")
-                else:
-                    freq = "1h"
 
-            
             complete_index = pd.date_range(df_indexed.index.min(), df_indexed.index.max(), freq=freq)
             gaps_count = len(complete_index) - len(df_indexed)
             
@@ -229,12 +236,7 @@ class Record:
         except Exception as e:
             print(f"[!] Error filling gaps: {e}")
 
-    def load(self, config: Dict[str, Any]) -> None:
-        self.folder = config["folder"]["name"]
-        os.makedirs(self.folder, exist_ok=True)
-        self.regular_columns = config["market"]["regular"]["columns"]
-        self.option_columns = config["market"]["option"]["columns"]
-    
+
     async def write(self, market: str, data: Dict[str, pd.DataFrame]) -> None:
         """Write data concurrently with one thread per file"""
         if not data:
@@ -327,27 +329,40 @@ class Record:
             return
 
         def _append_file(symbol: str, df: pd.DataFrame) -> None:
-            """Append single file synchronously"""
-            # Create market-specific folder
+            """Append single file synchronously, skipping duplicates"""
             market_folder = f"{self.folder}/{market}"
             os.makedirs(market_folder, exist_ok=True)
-            
+
             filename = f"{market_folder}/{symbol.replace('/', '_')}.csv"
-            
-            # Determine mode and header
             file_exists = os.path.exists(filename)
+
+            # Filter only new rows (by timestamp) if file exists
+            if file_exists:
+                try:
+                    existing = pd.read_csv(filename, usecols=["timestamp"])
+                    existing_timestamps = set(existing["timestamp"].astype(str))
+                    df = df[~df["timestamp"].astype(str).isin(existing_timestamps)]
+                except Exception as e:
+                    print(f"[!] Failed to read existing timestamps for {symbol}: {e}")
+                    return  # Optionally skip appending if error
+
+            if df.empty:
+                print(f"[!] No new rows to append for {symbol}")
+                return
+
             mode = 'a' if file_exists else 'w'
             header = not file_exists
-            
+
             print(f"[>] Appending path: {filename}")
             df.to_csv(filename, mode=mode, header=header, index=False)
+
+            self._fill_gaps_file(filename)
 
         try:
             append_tasks = []
             for symbol, df in data.items():
-                if not df.empty:
-                    task = asyncio.to_thread(_append_file, symbol, df)
-                    append_tasks.append(task)
+                task = asyncio.to_thread(_append_file, symbol, df)
+                append_tasks.append(task)
             
             if append_tasks:
                 await asyncio.gather(*append_tasks, return_exceptions=True)

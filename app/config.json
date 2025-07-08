@@ -13,8 +13,8 @@
             "historical": "BARS",
             "stream": "BARS",
             "time_value": {
-                "range": {"day": 7, "hour": 0, "minute": 0},
-                "step": {"day": 0, "hour": 0, "minute": 30}
+                "range": {"day": 90, "hour": 0, "minute": 0},
+                "step": {"day": 0, "hour": 0, "minute": 5}
             }
         },
 
@@ -23,7 +23,7 @@
             "historical": "BARS",
             "stream": "BARS",
             "time_value": {
-                "range": {"day": 5, "hour": 0, "minute": 0},
+                "range": {"day": 90, "hour": 0, "minute": 0},
                 "step": {"day": 0, "hour": 0, "minute": 5}
             }
         },
@@ -33,8 +33,8 @@
             "historical": "CHAIN",
             "stream": "TRADES",
             "time_value": {
-                "range": {"day": 5, "hour": 0, "minute": 0},
-                "step": {"day": 0, "hour": 0, "minute": 5},
+                "range": {"day": 365, "hour": 0, "minute": 0},
+                "step": {"day": 0, "hour": 0, "minute": 30},
                 "expire": {"day": 0}
             }
         }
@@ -57,17 +57,18 @@
     "model": {
         "method_1": {
             "name": "Long_Short_Term_Memory",
+            "use_pretrained": 1,
             "adjustable": {
-                "future_step": 5,
+                "future_step": 10,
                 "sample_size": 1
             },
             "settings": {
-                "lstm": [50, 50],
-                "dense": [25, 25],
-                "sequence_length": 60,
+                "lstm": [64, 32],
+                "dense": [50, 25],
+                "sequence_length": 288,
                 "train_split": 0.8,
                 "batch_size": 16,
-                "epochs": 1,
+                "epochs": 10,
                 "learning_rate": 0.001
             },
             "loss": "mean_squared_error",
