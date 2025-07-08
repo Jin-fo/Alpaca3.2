@@ -134,16 +134,18 @@ class Application:
                 crypto_df = await self.record.read(MarketType.CRYPTO.value, self.account.investment.get("crypto"))
                 stock_df = await self.record.read(MarketType.STOCK.value, self.account.investment.get("stock"))
 
+                operate_tasks = []
                 # Run predictions synchronously
-                if crypto_df and isinstance(crypto_df, dict):
-                    for symbol, df in crypto_df.items():
-                        if df is not None and not df.empty:
-                            self.model.operate(df, symbol)
+                for symbol, df in crypto_df.items():
+                    if df is not None and not df.empty:
+                        operate_tasks.append(self.model.operate(df, symbol))
                 
-                if stock_df and isinstance(stock_df, dict):
-                    for symbol, df in stock_df.items():
-                        if df is not None and not df.empty:
-                            self.model.operate(df, symbol)
+                for symbol, df in stock_df.items():
+                    if df is not None and not df.empty:
+                        operate_tasks.append(self.model.operate(df, symbol))
+
+                if operate_tasks:
+                    await asyncio.gather(*operate_tasks, return_exceptions=True)
 
                 predicted = True         
             
@@ -385,17 +387,6 @@ class Menu:
         
         # Then run models
         success = await self.app.run_models()
-        
-        if success:
-            print("[+] Historical data collection and model training completed successfully!")
-            print("[+] Continuous background processes are now running:")
-            print("    - Historical data collection: Active")
-            print("    - Model prediction: Active")
-            print("    - Use 'I' to check status or 'R' again to stop")
-            return True
-        else:
-            print("[!] Historical data collection completed, but model training failed!")
-            return False
 
     async def stop_historical_and_models(self):
         """Stop both historical data collection and model prediction"""

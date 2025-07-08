@@ -1,11 +1,11 @@
 {
   "symbol": "BTC/USD",
-  "analysis_timestamp": "2025-07-08 00:37:02",
+  "analysis_timestamp": "2025-07-08 12:53:01",
   "predicted_direction": "DOWN",
-  "actual_direction": "UP",
-  "direction_correct": false,
-  "price_accuracy": 98.85117751790278,
-  "overall_accuracy": 49.42558875895139,
-  "predicted_change_pct": -0.6041004788130522,
-  "actual_change_pct": 0.2006493085334544
+  "actual_direction": "DOWN",
+  "direction_correct": true,
+  "price_accuracy": 98.85540287579731,
+  "overall_accuracy": 50.0,
+  "predicted_change_pct": -0.6363366264849901,
+  "actual_change_pct": -0.16429864587260437
 }
