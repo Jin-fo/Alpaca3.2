@@ -188,7 +188,7 @@ class LSTM(Method):
             
             # Save scaler
             if self.scaler:
-                import joblib
+
                 joblib.dump(self.scaler, f"{self.folder}/{self.name}_scaler.pkl")
                 print(f"[o] Scaler saved")
             
@@ -297,6 +297,16 @@ class LSTM(Method):
             return None
         
         try:
+            # For pretrained models, skip testing since we don't have original test data
+            if self.use_pretrained:
+                print("[o] Pretrained model loaded - skipping test evaluation")
+                return None
+            
+            # For newly built models, run the test
+            if self.x_test is None or self.y_test is None:
+                print("[!] No test data available")
+                return None
+                
             loss = self.model.evaluate(self.x_test, self.y_test, verbose=0)
             print(f"[o] Test loss: {loss:.4f}")
             
@@ -467,8 +477,6 @@ class LSTM(Method):
             print(f"[!] Error analyzing trend: {e}")
             return {"error": str(e)}
 
-
-
 class Model:
     def __init__(self) -> None:
         self.model_list : List[Method] = []
@@ -519,8 +527,8 @@ class Model:
             if model is not None:
                 model.predict(data, symbol)
 
-    #def decide
-
+    def decide(self, data : pd.DataFrame, symbol : str) -> None:
+        pass
 
 
 

@@ -155,6 +155,7 @@ from py_vollib.black_scholes import black_scholes as bs
 class Record:
     def __init__(self):
         self.folder: str = "Record_Folder"
+        self.file_name: list[str] = []
         self.regular_columns: List[str] = []
         self.option_columns: List[str] = []
     
@@ -242,6 +243,8 @@ class Record:
         if not data:
             print("[!] No data to write")
             return
+        
+        self.file_path = []
 
         def _write_file(symbol: str, df: pd.DataFrame) -> None:
             market_folder = f"{self.folder}/{market}"
@@ -250,6 +253,7 @@ class Record:
             
             print(f"[>] Writing path: {filename}")
             df.to_csv(filename)
+            self.file_name.append(symbol)
             
             # Apply gap filling to the written CSV file
             self._fill_gaps_file(filename)
@@ -265,22 +269,16 @@ class Record:
         except Exception as e:
             print(f"[!] Error writing data: {e}")
 
-    async def read(self, market: str, symbols: Union[str, List[str]]) -> Dict[str, pd.DataFrame]:
+    async def read(self, market: str, symbols: List[str] = None) -> Dict[str, pd.DataFrame]: #read pervious written path
         """Read data concurrently"""
-        if not symbols:
+        # Use provided symbols or fall back to self.file_name
+        symbols_to_read = symbols if symbols is not None else self.file_name
+        if not symbols_to_read:
             return {}
             
-        if isinstance(symbols, str):
-            symbols = [symbols]
-        elif isinstance(symbols, list) and len(symbols) == 0:
-            print(f"[!] Empty symbols list for {market}")
-            return {}
-
         def _read_file(symbol: str) -> Optional[pd.DataFrame]:
             """Read single file synchronously"""
-            # Convert symbol name for filename (same as write method)
-            clean_symbol = symbol.replace('/', '_')
-            filename = f"{self.folder}/{market}/{clean_symbol}.csv"
+            filename = f"{self.folder}/{market}/{symbol.replace('/', '_')}.csv"
             if not os.path.exists(filename):
                 print(f"[!] File not found: {filename}")
                 return None
@@ -311,12 +309,12 @@ class Record:
 
         try:     
             read_tasks = []
-            for symbol in symbols:         
+            for symbol in symbols_to_read:         
                 task = asyncio.to_thread(_read_file, symbol)
                 read_tasks.append(task) 
             results = await asyncio.gather(*read_tasks, return_exceptions=True)
             
-            return {symbol: result for symbol, result in zip(symbols, results) 
+            return {symbol: result for symbol, result in zip(symbols_to_read, results) 
                     if isinstance(result, pd.DataFrame)}
         except Exception as e:
             print(f"[!] Error reading data: {e}")
